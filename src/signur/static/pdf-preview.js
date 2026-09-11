@@ -71,7 +71,8 @@ export async function openPdf(url) {
   errorBox.hidden = true;
   stage.hidden = false;
   pageStatus.textContent = "Caricamento…";
-  loadingTask = pdfjsLib.getDocument({
+  // Keep our own handle: a newer openPdf may replace the shared one while we wait.
+  const task = pdfjsLib.getDocument({
     url,
     cMapUrl: "/static/vendor/pdfjs/web/cmaps/",
     cMapPacked: true,
@@ -79,10 +80,11 @@ export async function openPdf(url) {
     wasmUrl: "/static/vendor/pdfjs/web/wasm/",
     iccUrl: "/static/vendor/pdfjs/web/iccs/",
   });
+  loadingTask = task;
   try {
-    const loaded = await loadingTask.promise;
+    const loaded = await task.promise;
     if (ownGeneration !== generation) {
-      await loaded.destroy();
+      await task.destroy();
       return;
     }
     pdfDocument = loaded;
@@ -102,16 +104,16 @@ export async function closePdf() {
     renderTask.cancel();
     renderTask = null;
   }
-  if (pdfDocument) {
-    await pdfDocument.destroy();
-    pdfDocument = null;
-    loadingTask = null;
-  } else if (loadingTask) {
-    await loadingTask.destroy();
-    loadingTask = null;
-  }
+  pdfDocument = null;
   canvas.width = 0;
   canvas.height = 0;
+  if (loadingTask) {
+    // Only the loading task can release the document and stop its worker: the
+    // document itself offers cleanup(), never destroy().
+    const task = loadingTask;
+    loadingTask = null;
+    await task.destroy();
+  }
 }
 
 export function currentPageNumber() {
