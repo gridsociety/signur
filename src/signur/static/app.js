@@ -270,21 +270,28 @@ function showSigner(identity) {
 }
 
 async function loadSigningResources() {
-  const [identityResult, proxiesResult, graphicsResult] = await Promise.allSettled([
-    api("/api/v1/signing-identity"),
+  const [proxiesResult, graphicsResult] = await Promise.allSettled([
     api("/api/v1/signing-proxies"),
     api("/api/v1/graphic-signatures"),
   ]);
   signingProxies = proxiesResult.status === "fulfilled" ? proxiesResult.value.items : [];
-  const fallbackIdentity = signingProxies.find((proxy) => proxy.available && proxy.identity)?.identity;
-  if (identityResult.status === "fulfilled" || fallbackIdentity) {
-    showSigner(identityResult.status === "fulfilled" ? identityResult.value : fallbackIdentity);
-  } else {
-    signerIdentity = null;
-    document.querySelector("#signer").classList.add("unavailable");
-    document.querySelector("#signer-name").textContent = "Certificato non disponibile";
-  }
   graphicSignatures = graphicsResult.status === "fulfilled" ? graphicsResult.value.items : [];
+
+  let identity = signingProxies.find((proxy) => proxy.available && proxy.identity)?.identity;
+  if (!identity) {
+    // Nothing is configured here, so ask the single proxy declared in the
+    // environment. Asking it when certificates exist only produces a failed
+    // request, since that endpoint ignores them.
+    const [legacy] = await Promise.allSettled([api("/api/v1/signing-identity")]);
+    if (legacy.status === "fulfilled") identity = legacy.value;
+  }
+  if (identity) {
+    showSigner(identity);
+    return;
+  }
+  signerIdentity = null;
+  document.querySelector("#signer").classList.add("unavailable");
+  document.querySelector("#signer-name").textContent = "Certificato non disponibile";
 }
 
 function currentGraphicVersion(graphic) {
