@@ -132,6 +132,7 @@ class GraphicSignature(Base):
     name: Mapped[str] = mapped_column(String(255), unique=True)
     description: Mapped[str] = mapped_column(String(1000), default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
     current_version_number: Mapped[int] = mapped_column(Integer, default=1)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])

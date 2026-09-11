@@ -25,7 +25,12 @@ from signur.models import (
     SignatureJob,
     UserRole,
 )
-from signur.schemas import GraphicSignatureList, GraphicSignatureUpdate, GraphicSignatureView
+from signur.schemas import (
+    GraphicSignatureList,
+    GraphicSignatureOrderUpdate,
+    GraphicSignatureUpdate,
+    GraphicSignatureView,
+)
 from signur.storage import LocalBlobStorage
 
 router = APIRouter(tags=["graphic signatures"])
@@ -59,11 +64,10 @@ async def _read_png(upload: UploadFile, settings: Settings) -> tuple[bytes, int,
                         "Le dimensioni dell'immagine superano il limite consentito.",
                     )
                 image.load()
-                alpha_min, alpha_max = image.convert("RGBA").getchannel("A").getextrema()
-                if alpha_min == 255:
-                    raise ApiError(
-                        422, "graphic_without_transparency", "Il PNG non contiene trasparenza."
-                    )
+                # Transparency suits a signature and the interface recommends it,
+                # but an opaque image is a legitimate choice. A fully transparent
+                # one is not: it would apply nothing at all.
+                _, alpha_max = image.convert("RGBA").getchannel("A").getextrema()
                 if alpha_max == 0:
                     raise ApiError(422, "graphic_invisible", "Il PNG è completamente trasparente.")
     except ApiError:
@@ -112,7 +116,7 @@ def list_graphics(_user: AccessUser, session: DbSession) -> GraphicSignatureList
         select(GraphicSignature)
         .options(selectinload(GraphicSignature.versions))
         .where(GraphicSignature.active.is_(True))
-        .order_by(GraphicSignature.name, GraphicSignature.id)
+        .order_by(GraphicSignature.sort_order, GraphicSignature.name, GraphicSignature.id)
     ).all()
     return GraphicSignatureList(items=[_view(graphic) for graphic in graphics], total=len(graphics))
 
@@ -122,7 +126,7 @@ def list_admin_graphics(_admin: AdminUser, session: DbSession) -> GraphicSignatu
     graphics = session.scalars(
         select(GraphicSignature)
         .options(selectinload(GraphicSignature.versions))
-        .order_by(GraphicSignature.name, GraphicSignature.id)
+        .order_by(GraphicSignature.sort_order, GraphicSignature.name, GraphicSignature.id)
     ).all()
     return GraphicSignatureList(items=[_view(graphic) for graphic in graphics], total=len(graphics))
 
@@ -194,6 +198,43 @@ def download_graphic(
         media_type="image/png",
         filename=f"{version.graphic_signature.name}-v{version.version_number}.png",
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.put("/admin/graphic-signatures/order", response_model=GraphicSignatureList)
+def reorder_graphics(
+    request: Request,
+    body: GraphicSignatureOrderUpdate,
+    admin: AdminUser,
+    session: DbSession,
+) -> GraphicSignatureList:
+    graphics = session.scalars(
+        select(GraphicSignature).options(selectinload(GraphicSignature.versions)).with_for_update()
+    ).all()
+    by_id = {graphic.id: graphic for graphic in graphics}
+    if len(set(body.ids)) != len(body.ids) or set(body.ids) != set(by_id):
+        raise ApiError(
+            422,
+            "incomplete_graphic_order",
+            "Il nuovo ordine deve elencare ogni firma grafica una sola volta.",
+        )
+    before = [graphic.name for graphic in sorted(graphics, key=lambda item: item.sort_order)]
+    for position, graphic_id in enumerate(body.ids):
+        by_id[graphic_id].sort_order = position
+    ordered = [by_id[graphic_id] for graphic_id in body.ids]
+    record_event(
+        session,
+        actor=admin,
+        action="graphic_signature.reordered",
+        entity_type="graphic_signature",
+        entity_id="order",
+        request_id=request.state.request_id,
+        details={"before": before, "after": [graphic.name for graphic in ordered]},
+    )
+    session.commit()
+    return GraphicSignatureList(
+        items=[GraphicSignatureView.model_validate(graphic) for graphic in ordered],
+        total=len(ordered),
     )
 
 
@@ -342,25 +383,58 @@ def delete_graphic_version(
     )
     if version is None:
         raise ApiError(404, "graphic_version_not_found", "Versione grafica non trovata.")
-    if version.version_number == version.graphic_signature.current_version_number:
-        raise ApiError(
-            409, "current_graphic_version", "La versione corrente non può essere eliminata."
-        )
     if session.scalar(
         select(func.count(Placement.id)).where(Placement.graphic_signature_version_id == version.id)
     ):
         raise ApiError(409, "graphic_version_referenced", "La versione è usata da un documento.")
-    storage_key = version.blob.storage_key
+    graphic = version.graphic_signature
+    remaining = session.scalars(
+        select(GraphicSignatureVersion)
+        .options(selectinload(GraphicSignatureVersion.blob))
+        .where(
+            GraphicSignatureVersion.graphic_signature_id == graphic_id,
+            GraphicSignatureVersion.id != version.id,
+        )
+        .order_by(GraphicSignatureVersion.version_number.desc())
+    ).all()
+    storage_keys = [version.blob.storage_key]
     version.blob.state = BlobState.DELETED
+    if remaining:
+        if version.version_number == graphic.current_version_number:
+            # Removing the current version brings back the latest one left.
+            graphic.current_version_number = remaining[0].version_number
+        session.delete(version)
+        action, details = (
+            "graphic_signature.version_deleted",
+            {"version": version_number, "sha256": version.sha256},
+        )
+    else:
+        # The last version is the entry itself: keeping an image-less catalogue
+        # row would leave something that can be chosen but never applied.
+        if session.scalar(
+            select(func.count(Placement.id))
+            .join(Placement.graphic_signature_version)
+            .where(GraphicSignatureVersion.graphic_signature_id == graphic_id)
+        ):
+            raise ApiError(
+                409, "graphic_version_referenced", "La versione è usata da un documento."
+            )
+        session.delete(version)
+        session.delete(graphic)
+        action, details = (
+            "graphic_signature.deleted",
+            {"name": graphic.name, "version": version_number},
+        )
     record_event(
         session,
         actor=admin,
-        action="graphic_signature.version_deleted",
+        action=action,
         entity_type="graphic_signature",
         entity_id=graphic_id,
         request_id=request.state.request_id,
-        details={"version": version_number, "sha256": version.sha256},
+        details=details,
     )
-    session.delete(version)
     session.commit()
-    LocalBlobStorage(settings.storage_root, settings.max_graphic_bytes).delete(storage_key)
+    storage = LocalBlobStorage(settings.storage_root, settings.max_graphic_bytes)
+    for key in storage_keys:
+        storage.delete(key)

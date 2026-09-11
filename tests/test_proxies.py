@@ -399,3 +399,88 @@ def test_the_identity_says_what_the_certificate_is_for(
     assert discovery.status_code == 200
     usi = [item["identity"]["intended_use"] for item in discovery.json()["items"]]
     assert usi == ["signature", "authentication"]
+
+
+def _finish_job(client, job_id: str) -> None:  # type: ignore[no-untyped-def]
+    """Close the attempt, as the worker would, without reaching a card."""
+    from uuid import UUID
+
+    from signur.database import get_session
+    from signur.models import SignatureJob, SignatureJobStatus
+
+    generator = client.app.dependency_overrides[get_session]()
+    session = next(generator)
+    try:
+        job = session.get(SignatureJob, UUID(job_id))
+        assert job is not None
+        job.status = SignatureJobStatus.FAILED
+        session.commit()
+    finally:
+        generator.close()
+
+
+def test_a_certificate_can_be_deleted_after_confirmation(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    created = client.post(
+        "/api/v1/admin/signing-proxies",
+        headers=mutation_headers("admin"),
+        json={
+            "name": "Da rimuovere",
+            "backend": "pkcs11_web_proxy",
+            "base_url": "http://127.0.0.1:9021",
+        },
+    ).json()
+
+    removed = client.delete(
+        f"/api/v1/admin/signing-proxies/{created['id']}", headers=mutation_headers("admin")
+    )
+
+    assert removed.status_code == 204, removed.text
+    listing = client.get("/api/v1/admin/signing-proxies", headers=auth_headers("admin")).json()
+    assert [item["name"] for item in listing["items"]] == []
+
+
+def test_deleting_a_certificate_leaves_the_signatures_it_made(  # type: ignore[no-untyped-def]
+    client, auth_headers, mutation_headers
+):
+    """History must keep saying which certificate signed, even once it is gone."""
+    from test_graphics import _pdf
+
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    proxy = client.post(
+        "/api/v1/admin/signing-proxies",
+        headers=mutation_headers("admin"),
+        json={
+            "name": "Carta storica",
+            "backend": "pkcs11_web_proxy",
+            "base_url": "http://127.0.0.1:9022",
+        },
+    ).json()
+    document = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("documento.pdf", _pdf(), "application/pdf")},
+    ).json()
+    job = client.post(
+        f"/api/v1/documents/{document['id']}/signatures",
+        headers=mutation_headers("admin"),
+        json={"mode": "cades", "signing_proxy_id": proxy["id"]},
+    )
+    assert job.status_code == 202, job.text
+
+    # While that attempt is in flight the certificate stays put.
+    in_flight = client.delete(
+        f"/api/v1/admin/signing-proxies/{proxy['id']}", headers=mutation_headers("admin")
+    )
+    assert in_flight.status_code == 409
+    assert in_flight.json()["error"]["code"] == "signing_proxy_in_use"
+    _finish_job(client, job.json()["id"])
+
+    removed = client.delete(
+        f"/api/v1/admin/signing-proxies/{proxy['id']}", headers=mutation_headers("admin")
+    )
+
+    assert removed.status_code == 204, removed.text
+    stored = client.get(f"/api/v1/signature-jobs/{job.json()['id']}", headers=auth_headers("admin"))
+    assert stored.status_code == 200
+    assert stored.json()["signing_proxy_name"] == "Carta storica"

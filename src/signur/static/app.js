@@ -44,6 +44,7 @@ let reconnectTimer = null;
 let realtimeFingerprint = "";
 let discoveredLocalCertificates = [];
 let adminProxies = [];
+let adminGraphics = [];
 let localDiscoveryToken = 0;
 let localLibraryDebounceTimer = null;
 const activeDocumentJobs = new Map();
@@ -846,9 +847,24 @@ async function uploadDocument(file) {
   }
 }
 
+// A bare row of inputs says nothing about what each one holds: every field
+// carries its name above it.
+function labelledField(text, input) {
+  const label = document.createElement("label");
+  label.className = "field";
+  label.append(document.createTextNode(text), input);
+  return label;
+}
+
 function renderAdminGraphics(items) {
+  adminGraphics = items;
   const container = document.querySelector("#graphics-admin");
+  if (!container.dataset.dropBound) {
+    graphicReordering.bindDragAndDrop(container);
+    container.dataset.dropBound = "true";
+  }
   container.replaceChildren();
+  document.querySelector("#graphic-order-help").hidden = !items.length;
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -856,8 +872,18 @@ function renderAdminGraphics(items) {
     container.append(empty);
     return;
   }
-  for (const graphic of items) {
+  for (const [index, graphic] of items.entries()) {
     const card = document.createElement("article");
+    card.dataset.graphicId = graphic.id;
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "move";
+      card.classList.add("dragging");
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+      card.draggable = false;
+      graphicReordering.adoptRenderedOrder(container);
+    });
     card.className = "admin-card";
     const current = currentGraphicVersion(graphic);
     const header = document.createElement("div");
@@ -871,19 +897,17 @@ function renderAdminGraphics(items) {
     heading.textContent = graphic.name;
     const meta = document.createElement("span");
     meta.className = "user-meta";
-    meta.textContent = `Versione corrente ${graphic.current_version_number} · ${graphic.active ? "Attiva" : "Disattivata"}`;
+    const predefinita = index === 0 && graphic.active ? " · Predefinita" : "";
+    meta.textContent = `Versione corrente ${graphic.current_version_number} · ${graphic.active ? "Attiva" : "Disattivata"}${predefinita}`;
     title.append(heading, meta);
-    header.append(preview, title);
+    header.append(preview, title, graphicReordering.controls(graphic, index, items.length));
 
     const editor = document.createElement("div");
     editor.className = "admin-editor";
     const name = document.createElement("input");
     name.value = graphic.name;
-    name.setAttribute("aria-label", "Nome firma grafica");
     const description = document.createElement("input");
     description.value = graphic.description;
-    description.placeholder = "Descrizione";
-    description.setAttribute("aria-label", "Descrizione firma grafica");
     const activeLabel = document.createElement("label");
     activeLabel.className = "check-field";
     const active = document.createElement("input");
@@ -909,7 +933,12 @@ function renderAdminGraphics(items) {
         save.disabled = false;
       }
     });
-    editor.append(name, description, activeLabel, save);
+    editor.append(
+      labelledField("Nome", name),
+      labelledField("Descrizione", description),
+      activeLabel,
+      save,
+    );
 
     const versions = document.createElement("div");
     versions.className = "version-list";
@@ -922,13 +951,19 @@ function renderAdminGraphics(items) {
       remove.type = "button";
       remove.className = "text-button";
       remove.textContent = "Elimina";
-      remove.disabled = version.version_number === graphic.current_version_number;
+      const ultima = graphic.versions.length === 1;
       remove.addEventListener("click", async () => {
-        if (!window.confirm(`Eliminare la versione ${version.version_number} di ${graphic.name}?`)) return;
+        const domanda = ultima
+          ? `Eliminare la versione ${version.version_number} di ${graphic.name}? È l'unica, quindi verrà rimossa l'intera firma grafica.`
+          : version.version_number === graphic.current_version_number
+            ? `Eliminare la versione ${version.version_number} di ${graphic.name}? Tornerà in uso la versione precedente.`
+            : `Eliminare la versione ${version.version_number} di ${graphic.name}?`;
+        if (!window.confirm(domanda)) return;
         try {
           await api(`/api/v1/admin/graphic-signatures/${graphic.id}/versions/${version.version_number}`, { method: "DELETE" });
-          showNotice("Versione eliminata.");
+          showNotice(ultima ? "Firma grafica eliminata." : "Versione eliminata.");
           await loadAdminGraphics();
+          await loadSigningResources();
         } catch (error) {
           showNotice(error.message, "error");
         }
@@ -975,128 +1010,161 @@ async function loadAdminGraphics() {
 
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-// Take the cards back to where they were, then let them slide into the new
-// order, so a click on an arrow reads as a movement rather than a redraw.
-function animateProxyReorder(previousTops) {
-  if (reducedMotion.matches) return;
-  for (const card of document.querySelectorAll("#proxies-admin .admin-card")) {
-    const previousTop = previousTops.get(card.dataset.proxyId);
-    if (previousTop === undefined) continue;
-    const shift = previousTop - card.getBoundingClientRect().top;
-    if (!shift) continue;
-    card.animate(
-      [{ transform: `translateY(${shift}px)` }, { transform: "none" }],
-      { duration: 180, easing: "ease-out" },
+// Reordering, shared by the certificates and by the graphic signatures: arrows
+// for the keyboard, a handle for the mouse, and saves that queue instead of
+// racing. The caller says where the cards live, how to read and replace the
+// list, and how to redraw it.
+function createReordering({ container, datasetKey, endpoint, read, write, render, reload, label }) {
+  let saving = Promise.resolve();
+  let queued = false;
+
+  const cards = () => document.querySelectorAll(`${container} .admin-card`);
+
+  function cardTops() {
+    const tops = new Map();
+    for (const card of cards()) tops.set(card.dataset[datasetKey], card.getBoundingClientRect().top);
+    return tops;
+  }
+
+  // Take the cards back to where they were, then let them slide into the new
+  // order, so a click on an arrow reads as a movement rather than a redraw.
+  function animate(previousTops) {
+    if (reducedMotion.matches) return;
+    for (const card of cards()) {
+      const previousTop = previousTops.get(card.dataset[datasetKey]);
+      if (previousTop === undefined) continue;
+      const shift = previousTop - card.getBoundingClientRect().top;
+      if (!shift) continue;
+      card.animate(
+        [{ transform: `translateY(${shift}px)` }, { transform: "none" }],
+        { duration: 180, easing: "ease-out" },
+      );
+    }
+  }
+
+  // Two arrow clicks in a row must not race: the saves run one after the other,
+  // and a save still queued simply picks up the latest order when its turn comes.
+  function persist() {
+    if (queued) return saving;
+    queued = true;
+    saving = saving.then(async () => {
+      queued = false;
+      try {
+        await api(endpoint, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: read().map((item) => item.id) }),
+        });
+        await loadSigningResources();
+      } catch (error) {
+        showNotice(error.message, "error");
+        await reload();
+      }
+    });
+    return saving;
+  }
+
+  function move(from, to) {
+    const items = read();
+    if (to < 0 || to >= items.length || from === to) return;
+    const previousTops = cardTops();
+    const [moved] = items.splice(from, 1);
+    items.splice(to, 0, moved);
+    write(items);
+    render();
+    animate(previousTops);
+    persist();
+  }
+
+  function cardBelow(node, pointerY) {
+    return [...node.querySelectorAll(".admin-card:not(.dragging)")].find(
+      (card) => pointerY < card.getBoundingClientRect().top + card.offsetHeight / 2,
     );
   }
-}
 
-function proxyCardTops() {
-  const tops = new Map();
-  for (const card of document.querySelectorAll("#proxies-admin .admin-card")) {
-    tops.set(card.dataset.proxyId, card.getBoundingClientRect().top);
-  }
-  return tops;
-}
+  return {
+    controls(item, index, total) {
+      const controls = document.createElement("div");
+      controls.className = "order-controls";
+      const handle = document.createElement("span");
+      handle.className = "drag-handle";
+      handle.title = "Trascina per riordinare";
+      handle.textContent = "⠿";
+      // The card is only draggable while the handle is held, so the fields
+      // inside it stay selectable.
+      handle.addEventListener("pointerdown", () => { handle.closest(".admin-card").draggable = true; });
+      handle.addEventListener("pointerup", () => { handle.closest(".admin-card").draggable = false; });
+      controls.append(handle);
+      for (const [direction, symbol, target] of [
+        ["in su", "↑", index - 1],
+        ["in giù", "↓", index + 1],
+      ]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "icon-button";
+        button.textContent = symbol;
+        button.setAttribute("aria-label", `Sposta ${label(item)} ${direction}`);
+        button.disabled = target < 0 || target >= total;
+        button.addEventListener("click", () => move(index, target));
+        controls.append(button);
+      }
+      return controls;
+    },
 
-// Two arrow clicks in a row must not race: the saves run one after the other,
-// and a save still queued simply picks up the latest order when its turn comes.
-let proxyOrderSave = Promise.resolve();
-let proxyOrderSaveQueued = false;
-
-function persistProxyOrder() {
-  if (proxyOrderSaveQueued) return proxyOrderSave;
-  proxyOrderSaveQueued = true;
-  proxyOrderSave = proxyOrderSave.then(async () => {
-    proxyOrderSaveQueued = false;
-    try {
-      await api("/api/v1/admin/signing-proxies/order", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: adminProxies.map((proxy) => proxy.id) }),
+    bindDragAndDrop(node) {
+      node.addEventListener("dragover", (event) => {
+        const dragged = node.querySelector(".admin-card.dragging");
+        if (!dragged) return;
+        event.preventDefault();
+        const below = cardBelow(node, event.clientY);
+        if (below) node.insertBefore(dragged, below);
+        else node.append(dragged);
       });
-      await loadSigningResources();
-    } catch (error) {
-      showNotice(error.message, "error");
-      await loadAdminProxies();
-    }
-  });
-  return proxyOrderSave;
+      node.addEventListener("drop", (event) => event.preventDefault());
+    },
+
+    adoptRenderedOrder(node) {
+      const items = read();
+      const byId = new Map(items.map((item) => [item.id, item]));
+      const rearranged = [...node.querySelectorAll(".admin-card")].map(
+        (card) => byId.get(card.dataset[datasetKey]),
+      );
+      if (rearranged.some((item, index) => item !== items[index])) {
+        write(rearranged);
+        render();
+        persist();
+      }
+    },
+  };
 }
 
-function moveProxy(from, to) {
-  if (to < 0 || to >= adminProxies.length || from === to) return;
-  const previousTops = proxyCardTops();
-  const [moved] = adminProxies.splice(from, 1);
-  adminProxies.splice(to, 0, moved);
-  renderAdminProxies(adminProxies);
-  animateProxyReorder(previousTops);
-  persistProxyOrder();
-}
+const proxyReordering = createReordering({
+  container: "#proxies-admin",
+  datasetKey: "proxyId",
+  endpoint: "/api/v1/admin/signing-proxies/order",
+  read: () => adminProxies,
+  write: (items) => { adminProxies = items; },
+  render: () => renderAdminProxies(adminProxies),
+  reload: () => loadAdminProxies(),
+  label: (proxy) => proxy.name,
+});
 
-function proxyCardBelow(container, pointerY) {
-  return [...container.querySelectorAll(".admin-card:not(.dragging)")].find(
-    (card) => pointerY < card.getBoundingClientRect().top + card.offsetHeight / 2,
-  );
-}
-
-function bindProxyDragAndDrop(container) {
-  container.addEventListener("dragover", (event) => {
-    const dragged = container.querySelector(".admin-card.dragging");
-    if (!dragged) return;
-    event.preventDefault();
-    const below = proxyCardBelow(container, event.clientY);
-    if (below) container.insertBefore(dragged, below);
-    else container.append(dragged);
-  });
-  container.addEventListener("drop", (event) => event.preventDefault());
-}
-
-function adoptRenderedProxyOrder(container) {
-  const byId = new Map(adminProxies.map((proxy) => [proxy.id, proxy]));
-  const rearranged = [...container.querySelectorAll(".admin-card")].map(
-    (card) => byId.get(card.dataset.proxyId),
-  );
-  if (rearranged.some((proxy, index) => proxy !== adminProxies[index])) {
-    adminProxies = rearranged;
-    renderAdminProxies(adminProxies);
-    persistProxyOrder();
-  }
-}
-
-function proxyOrderControls(proxy, index, total) {
-  const controls = document.createElement("div");
-  controls.className = "order-controls";
-  const handle = document.createElement("span");
-  handle.className = "drag-handle";
-  handle.title = "Trascina per riordinare";
-  handle.textContent = "⠿";
-  // The card is only draggable while the handle is held, so the fields inside
-  // it stay selectable.
-  handle.addEventListener("pointerdown", () => { handle.closest(".admin-card").draggable = true; });
-  handle.addEventListener("pointerup", () => { handle.closest(".admin-card").draggable = false; });
-  controls.append(handle);
-  for (const [label, symbol, target] of [
-    ["in su", "↑", index - 1],
-    ["in giù", "↓", index + 1],
-  ]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "icon-button";
-    button.textContent = symbol;
-    button.setAttribute("aria-label", `Sposta ${proxy.name} ${label}`);
-    button.disabled = target < 0 || target >= total;
-    button.addEventListener("click", () => moveProxy(index, target));
-    controls.append(button);
-  }
-  return controls;
-}
+const graphicReordering = createReordering({
+  container: "#graphics-admin",
+  datasetKey: "graphicId",
+  endpoint: "/api/v1/admin/graphic-signatures/order",
+  read: () => adminGraphics,
+  write: (items) => { adminGraphics = items; },
+  render: () => renderAdminGraphics(adminGraphics),
+  reload: () => loadAdminGraphics(),
+  label: (graphic) => graphic.name,
+});
 
 function renderAdminProxies(items) {
   adminProxies = items;
   const container = document.querySelector("#proxies-admin");
   if (!container.dataset.dropBound) {
-    bindProxyDragAndDrop(container);
+    proxyReordering.bindDragAndDrop(container);
     container.dataset.dropBound = "true";
   }
   container.replaceChildren();
@@ -1119,7 +1187,7 @@ function renderAdminProxies(items) {
     card.addEventListener("dragend", () => {
       card.classList.remove("dragging");
       card.draggable = false;
-      adoptRenderedProxyOrder(container);
+      proxyReordering.adoptRenderedOrder(container);
     });
     const header = document.createElement("div");
     header.className = "admin-card-header";
@@ -1132,13 +1200,13 @@ function renderAdminProxies(items) {
     const pinLabel = proxy.backend === "local" ? ` · PIN ${proxy.pin_saved ? "salvato" : "richiesto a ogni firma"}` : "";
     meta.textContent = `${backendLabel} · Configurazione v${proxy.version} · ${proxy.active ? "Attivo" : "Disattivato"}${pinLabel}`;
     title.append(heading, meta);
-    header.append(title, proxyOrderControls(proxy, index, items.length));
+    header.append(title, proxyReordering.controls(proxy, index, items.length));
 
     const editor = document.createElement("div");
     editor.className = "admin-editor proxy-editor";
     const name = document.createElement("input");
     name.value = proxy.name;
-    name.setAttribute("aria-label", "Nome certificato");
+    const configurationFields = [labelledField("Nome", name)];
     const configurationInputs = [];
     if (proxy.backend === "local") {
       for (const [field, label, value] of [
@@ -1148,17 +1216,17 @@ function renderAdminProxies(items) {
       ]) {
         const input = document.createElement("input");
         input.value = value || "";
-        input.setAttribute("aria-label", label);
         input.dataset.field = field;
         configurationInputs.push(input);
+        configurationFields.push(labelledField(label, input));
       }
     } else {
       const url = document.createElement("input");
       url.value = proxy.base_url || "";
       url.type = "url";
-      url.setAttribute("aria-label", "URL PKCS11 Web Proxy");
       url.dataset.field = "base_url";
       configurationInputs.push(url);
+      configurationFields.push(labelledField("URL del PKCS11 Web Proxy", url));
     }
     const activeLabel = document.createElement("label");
     activeLabel.className = "check-field";
@@ -1200,7 +1268,22 @@ function renderAdminProxies(items) {
         check.disabled = false;
       }
     });
-    editor.append(name, ...configurationInputs, activeLabel, save, check);
+    const removeProxy = document.createElement("button");
+    removeProxy.className = "button danger";
+    removeProxy.textContent = "Elimina";
+    removeProxy.addEventListener("click", async () => {
+      if (!window.confirm(`Eliminare il certificato “${proxy.name}”? I documenti già firmati con esso restano invariati.`)) return;
+      removeProxy.disabled = true;
+      try {
+        await api(`/api/v1/admin/signing-proxies/${proxy.id}`, { method: "DELETE" });
+        showNotice("Certificato eliminato.");
+        await Promise.all([loadAdminProxies(), loadSigningResources()]);
+      } catch (error) {
+        showNotice(error.message, "error");
+        removeProxy.disabled = false;
+      }
+    });
+    editor.append(...configurationFields, activeLabel, save, check, removeProxy);
     if (proxy.backend === "local") {
       const pinEditor = document.createElement("div");
       pinEditor.className = "inline-upload";

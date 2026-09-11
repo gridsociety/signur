@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from signur.audit import record_event
@@ -16,7 +16,12 @@ from signur.local_pkcs11 import (
     discover_certificates,
     known_library_paths,
 )
-from signur.models import CertificateBackend, SigningProxy
+from signur.models import (
+    CertificateBackend,
+    SignatureJob,
+    SignatureJobStatus,
+    SigningProxy,
+)
 from signur.proxy_security import validate_proxy_url
 from signur.schemas import (
     KnownPkcs11LibrariesView,
@@ -251,6 +256,50 @@ def create_proxy(
         session.rollback()
         raise ApiError(409, "signing_proxy_exists", "Nome o URL del proxy già presente.") from exc
     return SigningProxyAdminView.model_validate(proxy)
+
+
+@router.delete("/admin/signing-proxies/{proxy_id}", status_code=204)
+def delete_proxy(
+    request: Request,
+    proxy_id: uuid.UUID,
+    admin: AdminUser,
+    session: DbSession,
+) -> None:
+    proxy = session.scalar(
+        select(SigningProxy).where(SigningProxy.id == proxy_id).with_for_update()
+    )
+    if proxy is None:
+        raise ApiError(404, "signing_proxy_not_found", "Certificato non trovato.")
+    active_job = session.scalar(
+        select(SignatureJob.id).where(
+            SignatureJob.signing_proxy_id == proxy_id,
+            SignatureJob.status.in_((SignatureJobStatus.QUEUED, SignatureJobStatus.RUNNING)),
+        )
+    )
+    if active_job is not None:
+        raise ApiError(
+            409,
+            "signing_proxy_in_use",
+            "Il certificato sta firmando un documento: riprova a operazione conclusa.",
+        )
+    # Past signatures keep the name they were made with, so the history still
+    # says which certificate signed once the configuration is gone.
+    session.execute(
+        update(SignatureJob)
+        .where(SignatureJob.signing_proxy_id == proxy_id)
+        .values(signing_proxy_id=None)
+    )
+    record_event(
+        session,
+        actor=admin,
+        action="signing_proxy.deleted",
+        entity_type="signing_proxy",
+        entity_id=proxy_id,
+        request_id=request.state.request_id,
+        details={"name": proxy.name, "backend": proxy.backend.value},
+    )
+    session.delete(proxy)
+    session.commit()
 
 
 @router.patch("/admin/signing-proxies/{proxy_id}", response_model=SigningProxyAdminView)

@@ -74,25 +74,54 @@ def test_admin_manages_versioned_graphics_and_user_downloads(
     )
     assert deleted.status_code == 204
 
+    # Version 2 is now the only one left, so removing it takes the whole entry.
     current = client.delete(
         f"/api/v1/admin/graphic-signatures/{graphic['id']}/versions/2",
         headers=mutation_headers("admin"),
     )
-    assert current.status_code == 409
-    assert current.json()["error"]["code"] == "current_graphic_version"
+    assert current.status_code == 204
+    assert (
+        client.get("/api/v1/admin/graphic-signatures", headers=auth_headers("admin")).json()[
+            "total"
+        ]
+        == 0
+    )
     assert admin["role"] == "admin"
 
 
-def test_graphic_requires_real_transparency(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+def test_an_opaque_graphic_is_accepted(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    """Transparency suits a signature, but a plain image is the author's choice."""
     client.get("/api/v1/me", headers=auth_headers("admin"))
+
     response = client.post(
         "/api/v1/admin/graphic-signatures",
         headers=mutation_headers("admin"),
         data={"name": "Opaca"},
         files={"image": ("opaque.png", _png(transparent=False), "image/png")},
     )
+
+    assert response.status_code == 201, response.text
+
+
+def test_an_invisible_graphic_is_refused(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    """Nothing at all would be applied, so there is nothing to choose later."""
+    import io
+
+    from PIL import Image
+
+    output = io.BytesIO()
+    Image.new("RGBA", (12, 8), (0, 0, 0, 0)).save(output, format="PNG")
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+
+    response = client.post(
+        "/api/v1/admin/graphic-signatures",
+        headers=mutation_headers("admin"),
+        data={"name": "Invisibile"},
+        files={"image": ("vuota.png", output.getvalue(), "image/png")},
+    )
+
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "graphic_without_transparency"
+    assert response.json()["error"]["code"] == "graphic_invisible"
 
 
 def test_admin_catalog_includes_inactive_graphics(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
@@ -253,3 +282,86 @@ def test_a_refused_plan_answers_with_a_readable_422(client, auth_headers, mutati
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "validation_error"
     assert "posizionamenti" in str(response.json()["error"]["details"])
+
+
+def test_deleting_the_current_version_restores_the_previous_one(
+    client, auth_headers, mutation_headers
+):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    graphic = _create(client, mutation_headers("admin"), name="Firma con storia").json()
+    for _ in range(2):
+        client.post(
+            f"/api/v1/admin/graphic-signatures/{graphic['id']}/versions",
+            headers=mutation_headers("admin"),
+            files={"image": ("firma.png", _png(), "image/png")},
+        )
+
+    removed = client.delete(
+        f"/api/v1/admin/graphic-signatures/{graphic['id']}/versions/3",
+        headers=mutation_headers("admin"),
+    )
+
+    assert removed.status_code == 204
+    after = client.get("/api/v1/admin/graphic-signatures", headers=auth_headers("admin")).json()[
+        "items"
+    ][0]
+    assert after["current_version_number"] == 2
+    assert [version["version_number"] for version in after["versions"]] == [1, 2]
+
+
+def test_a_version_a_document_uses_is_never_deleted(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    graphic = _create(client, mutation_headers("admin"), name="Firma in uso").json()
+    uploaded = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("documento.pdf", _pdf(), "application/pdf")},
+    )
+    client.post(
+        f"/api/v1/documents/{uploaded.json()['id']}/signatures",
+        headers=mutation_headers("admin"),
+        json={"mode": "graphic", "placements": [_placement(graphic["versions"][0]["id"], 0)]},
+    )
+
+    refused = client.delete(
+        f"/api/v1/admin/graphic-signatures/{graphic['id']}/versions/1",
+        headers=mutation_headers("admin"),
+    )
+
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "graphic_version_referenced"
+
+
+def test_the_catalogue_keeps_the_order_an_admin_gives_it(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    """The first graphic is the one offered by default, so its place matters."""
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    prima = _create(client, mutation_headers("admin"), name="Alfa").json()
+    seconda = _create(client, mutation_headers("admin"), name="Zeta").json()
+
+    reordered = client.put(
+        "/api/v1/admin/graphic-signatures/order",
+        headers=mutation_headers("admin"),
+        json={"ids": [seconda["id"], prima["id"]]},
+    )
+
+    assert reordered.status_code == 200, reordered.text
+    assert [item["name"] for item in reordered.json()["items"]] == ["Zeta", "Alfa"]
+    admin_listing = client.get("/api/v1/admin/graphic-signatures", headers=auth_headers("admin"))
+    assert [item["name"] for item in admin_listing.json()["items"]] == ["Zeta", "Alfa"]
+    user_listing = client.get("/api/v1/graphic-signatures", headers=auth_headers("admin"))
+    assert [item["name"] for item in user_listing.json()["items"]] == ["Zeta", "Alfa"]
+
+
+def test_an_order_must_list_every_graphic_exactly_once(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    graphic = _create(client, mutation_headers("admin"), name="Sola").json()
+    _create(client, mutation_headers("admin"), name="Altra")
+
+    refused = client.put(
+        "/api/v1/admin/graphic-signatures/order",
+        headers=mutation_headers("admin"),
+        json={"ids": [graphic["id"]]},
+    )
+
+    assert refused.status_code == 422
+    assert refused.json()["error"]["code"] == "incomplete_graphic_order"

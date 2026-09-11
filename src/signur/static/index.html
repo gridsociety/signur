@@ -137,14 +137,19 @@
 
         <section id="graphics-panel" class="panel" hidden>
           <div class="hero compact">
-            <div><span class="eyebrow">Amministrazione</span><h1>Firme grafiche</h1><p>Gestisci immagini PNG trasparenti e relative versioni.</p></div>
+            <div><span class="eyebrow">Amministrazione</span><h1>Firme grafiche</h1><p>Gestisci le immagini PNG e le loro versioni.</p></div>
           </div>
           <form id="create-graphic-form" class="admin-form">
             <label class="field" for="new-graphic-name">Nome<input id="new-graphic-name" name="name" required maxlength="255"></label>
             <label class="field" for="new-graphic-description">Descrizione<input id="new-graphic-description" name="description" maxlength="1000"></label>
-            <label class="field" for="new-graphic-image">PNG trasparente<input id="new-graphic-image" name="image" type="file" accept="image/png" required></label>
+            <label class="field" for="new-graphic-image">Immagine PNG<input id="new-graphic-image" name="image" type="file" accept="image/png" required></label>
+            <p class="field-help">Uno sfondo trasparente si posa meglio sul documento, ma non è obbligatorio.</p>
             <button class="button primary" type="submit">Crea firma grafica</button>
           </form>
+          <p id="graphic-order-help" class="field-help" hidden>
+            La prima firma grafica dell’elenco è quella proposta per impostazione predefinita.
+            Trascina la maniglia ⠿ o usa le frecce per cambiare l’ordine.
+          </p>
           <section id="graphics-admin" class="admin-list" aria-live="polite"></section>
         </section>
 

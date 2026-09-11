@@ -287,6 +287,10 @@ class SigningProxyUpdate(BaseModel):
     pin: SecretStr | None = None
 
 
+class GraphicSignatureOrderUpdate(BaseModel):
+    ids: list[uuid.UUID]
+
+
 class SigningProxyOrderUpdate(BaseModel):
     ids: list[uuid.UUID]
 
