@@ -3,6 +3,7 @@ import sys
 import uuid
 from collections.abc import Sequence
 from contextlib import suppress
+from typing import NoReturn
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -17,18 +18,54 @@ class CliError(Exception):
     pass
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+ESEMPI = """Esempi:
+  signur-admin users list
+  signur-admin users set-role mario@esempio.it admin
+  signur-admin users set-role 7a9c37cb-98c6-477c-8cf1-67271c281eba no_access
+"""
+
+
+class _Parser(argparse.ArgumentParser):
+    """Show what can be done, instead of only saying what was wrong."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_help()
+        print(f"\nErrore: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _parser() -> _Parser:
+    parser = _Parser(
         prog="signur-admin",
-        description="Amministrazione locale di emergenza di Signur.",
+        description=(
+            "Amministrazione locale di Signur, da usare sulla macchina che lo ospita: "
+            "opera direttamente sul database, senza passare dall'interfaccia. Serve "
+            "quando non si riesce più a entrare, per esempio se l'ultimo "
+            "amministratore è stato declassato."
+        ),
+        epilog=ESEMPI,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    commands = parser.add_subparsers(dest="command", required=True)
-    users = commands.add_parser("users", help="Gestisce gli utenti locali.")
-    user_commands = users.add_subparsers(dest="users_command", required=True)
+    commands = parser.add_subparsers(dest="command", parser_class=_Parser)
+    users = commands.add_parser(
+        "users",
+        help="Elenca gli utenti e ne cambia il ruolo.",
+        description="Elenca gli utenti e ne cambia il ruolo.",
+        epilog=ESEMPI,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Each group carries its own parser, so an incomplete command line can show
+    # the help of the group that was asked for.
+    users.set_defaults(group=users)
+    user_commands = users.add_subparsers(dest="users_command")
     user_commands.add_parser("list", help="Elenca gli utenti registrati.")
     set_role = user_commands.add_parser("set-role", help="Cambia il ruolo di un utente.")
-    set_role.add_argument("identifier", help="UUID, UID esterno o indirizzo email.")
-    set_role.add_argument("role", choices=[role.value for role in UserRole])
+    set_role.add_argument("identifier", help="UUID, nome utente o indirizzo email.")
+    set_role.add_argument(
+        "role",
+        choices=[role.value for role in UserRole],
+        help="Il ruolo da assegnare.",
+    )
     return parser
 
 
@@ -77,7 +114,20 @@ def _set_role(session: Session, identifier: str, role: UserRole) -> None:
 
 
 def main(argv: Sequence[str] | None = None, settings: Settings | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exit_code:
+        # argparse ends the process on --help and on a wrong command line; here the
+        # outcome travels as a return value, like every other path in this module.
+        return int(exit_code.code or 0)
+    if args.command is None:
+        # Nothing asked: say what there is, rather than complain about it.
+        parser.print_help()
+        return 0
+    if args.users_command is None:
+        args.group.print_help()
+        return 2
     engine = build_engine(settings or get_settings())
     try:
         with Session(engine) as session:

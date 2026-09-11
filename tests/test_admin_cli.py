@@ -62,3 +62,30 @@ def test_cli_reports_unknown_user_without_changing_data(tmp_path, capsys):  # ty
 
     assert main(["users", "set-role", "missing", "admin"], settings) == 1
     assert "Nessun utente" in capsys.readouterr().err
+
+
+def test_running_it_bare_explains_itself(capsys):  # type: ignore[no-untyped-def]
+    """Someone locked out of the interface needs to be told what this can do."""
+    code = main([])
+
+    stampato = capsys.readouterr().out
+    assert code == 0
+    assert "users" in stampato
+    assert "set-role" in stampato
+    assert "Esempi" in stampato
+
+
+def test_a_group_without_a_command_shows_that_group(capsys):  # type: ignore[no-untyped-def]
+    code = main(["users"])
+
+    stampato = capsys.readouterr().out
+    assert code == 2
+    assert "list" in stampato and "set-role" in stampato
+
+
+def test_a_wrong_command_shows_the_ones_that_exist(capsys):  # type: ignore[no-untyped-def]
+    code = main(["utenti"])
+
+    catturato = capsys.readouterr()
+    assert code == 2
+    assert "users" in catturato.out + catturato.err

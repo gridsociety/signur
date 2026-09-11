@@ -122,6 +122,9 @@ def test_admin_can_transfer_document_ownership(monkeypatch):  # type: ignore[no-
 
 
 def test_api_client_sets_public_origin_for_mutations(monkeypatch):  # type: ignore[no-untyped-def]
+    # A session stored by whoever runs the tests would be used first: this is
+    # about the token, so the keychain is taken out of the picture.
+    monkeypatch.setattr("signur_cli.client.keychain.load_session", lambda: None)
     monkeypatch.setenv("SIGNUR_API_TOKEN", "secret")
     headers = Client("https://signur.example.org/api/v1")._headers()
     assert headers["Origin"] == "https://signur.example.org"
@@ -129,6 +132,7 @@ def test_api_client_sets_public_origin_for_mutations(monkeypatch):  # type: igno
 
 
 def test_api_token_uses_basic_auth_when_the_gateway_requires_a_username(monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("signur_cli.client.keychain.load_session", lambda: None)
     monkeypatch.setenv("SIGNUR_API_TOKEN", "secret")
     monkeypatch.setenv("SIGNUR_API_TOKEN_BASIC_USER", "gateway-user")
     headers = Client("https://signur.example.org/api/v1")._headers()
@@ -257,3 +261,20 @@ def test_login_falls_back_to_oauth_when_the_server_uses_a_gateway(monkeypatch): 
     result = CliRunner().invoke(cli_main.root, ["auth", "login"], input="http://server/api/v1\n")
     assert result.exit_code == 0, result.output
     assert "già presente" in result.output
+
+
+def test_every_command_says_what_it_does() -> None:
+    """A command with no line of its own is invisible in the listing above it."""
+    import click
+
+    from signur_cli.main import root
+
+    def muti(comando: click.Command, percorso: str = "") -> list[str]:
+        nome = f"{percorso} {comando.name}".strip()
+        senza = [] if (comando.help or "").strip() else [nome]
+        if isinstance(comando, click.Group):
+            for sotto in comando.commands.values():
+                senza += muti(sotto, nome)
+        return senza
+
+    assert muti(root) == []

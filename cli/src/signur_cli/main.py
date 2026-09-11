@@ -93,6 +93,7 @@ def auth() -> None:
 @click.option("--reauth", is_flag=True, help="Sostituisce le credenziali esistenti.")
 @pass_context
 def auth_login(ctx: Context, api_url: str, no_browser: bool, reauth: bool) -> None:
+    """Accede al servizio e conserva la sessione per i comandi successivi."""
     api_url = api_url.strip() or click.prompt(
         "URL del servizio Signur", default=config.value("api_base_url"), show_default=True
     )
@@ -160,6 +161,7 @@ def auth_login(ctx: Context, api_url: str, no_browser: bool, reauth: bool) -> No
 @auth.command("logout")
 @pass_context
 def auth_logout(ctx: Context) -> None:
+    """Chiude la sessione e dimentica le credenziali conservate."""
     if keychain.load_session():
         with suppress(ApiError):
             Client().request("POST", "/auth/logout")
@@ -171,6 +173,7 @@ def auth_logout(ctx: Context) -> None:
 @auth.command("status")
 @pass_context
 def auth_status(ctx: Context) -> None:
+    """Mostra con quale identità e ruolo si è collegati."""
     profile = call(ctx, "GET", "/me")
     emit(ctx, profile, f"{profile['display_name']} — {profile['role']}")
 
@@ -192,6 +195,7 @@ def documents() -> None:
 @click.option("--offset", default=0, type=click.IntRange(0))
 @pass_context
 def documents_list(ctx: Context, limit: int, offset: int) -> None:
+    """Elenca i documenti visibili, dal più recente."""
     emit(ctx, call(ctx, "GET", f"/documents?limit={limit}&offset={offset}"))
 
 
@@ -199,6 +203,7 @@ def documents_list(ctx: Context, limit: int, offset: int) -> None:
 @click.argument("document_id")
 @pass_context
 def documents_show(ctx: Context, document_id: str) -> None:
+    """Mostra stato, formato e analisi di un documento."""
     emit(ctx, call(ctx, "GET", f"/documents/{document_id}"))
 
 
@@ -206,6 +211,7 @@ def documents_show(ctx: Context, document_id: str) -> None:
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @pass_context
 def documents_upload(ctx: Context, path: Path) -> None:
+    """Carica un file e lo mette in attesa di firma."""
     result = call(
         ctx,
         "POST",
@@ -225,6 +231,7 @@ def _download(ctx: Context, document_id: str, kind: str, output: Path) -> None:
 @click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
 @pass_context
 def documents_download_original(ctx: Context, document_id: str, output: Path) -> None:
+    """Scarica il file come è stato caricato."""
     _download(ctx, document_id, "original", output)
 
 
@@ -233,6 +240,7 @@ def documents_download_original(ctx: Context, document_id: str, output: Path) ->
 @click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
 @pass_context
 def documents_download_result(ctx: Context, document_id: str, output: Path) -> None:
+    """Scarica il documento firmato."""
     _download(ctx, document_id, "result", output)
 
 
@@ -240,6 +248,7 @@ def documents_download_result(ctx: Context, document_id: str, output: Path) -> N
 @click.argument("document_id")
 @pass_context
 def documents_delete(ctx: Context, document_id: str) -> None:
+    """Elimina un documento non ancora firmato."""
     call(ctx, "DELETE", f"/documents/{document_id}")
     emit(ctx, {"deleted": True, "document_id": document_id}, "Documento eliminato.")
 
@@ -267,6 +276,7 @@ def documents_set_owner(ctx: Context, document_id: str, user_id: str) -> None:
 @click.argument("document_id")
 @pass_context
 def documents_analysis(ctx: Context, document_id: str) -> None:
+    """Mostra tipo rilevato, capacità e controllo PDF/A."""
     emit(ctx, call(ctx, "GET", f"/documents/{document_id}/analysis"))
 
 
@@ -274,6 +284,7 @@ def documents_analysis(ctx: Context, document_id: str) -> None:
 @click.argument("document_id")
 @pass_context
 def documents_existing_signatures(ctx: Context, document_id: str) -> None:
+    """Elenca le firme già presenti nel file caricato."""
     emit(ctx, call(ctx, "GET", f"/documents/{document_id}/existing-signatures"))
 
 
@@ -282,6 +293,7 @@ def documents_existing_signatures(ctx: Context, document_id: str) -> None:
 @click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
 @pass_context
 def documents_preview(ctx: Context, document_id: str, output: Path) -> None:
+    """Scarica l'anteprima del documento, dove è disponibile."""
     emit(ctx, call(ctx, "GET", f"/documents/{document_id}/preview", output=output))
 
 
@@ -289,6 +301,7 @@ def documents_preview(ctx: Context, document_id: str, output: Path) -> None:
 @click.argument("document_id")
 @pass_context
 def documents_follow_up(ctx: Context, document_id: str) -> None:
+    """Apre una nuova pratica a partire da un documento già firmato."""
     emit(ctx, call(ctx, "POST", f"/documents/{document_id}/follow-up"))
 
 
@@ -301,6 +314,7 @@ def documents_draft() -> None:
 @click.argument("document_id")
 @pass_context
 def documents_draft_show(ctx: Context, document_id: str) -> None:
+    """Mostra la bozza di firma salvata per un documento."""
     emit(ctx, call(ctx, "GET", f"/documents/{document_id}/draft"))
 
 
@@ -309,6 +323,7 @@ def documents_draft_show(ctx: Context, document_id: str) -> None:
 @click.argument("plan", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @pass_context
 def documents_draft_set(ctx: Context, document_id: str, plan: Path) -> None:
+    """Sostituisce la bozza di firma di un documento."""
     try:
         body = json.loads(plan.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -357,6 +372,7 @@ def signatures_create(
     pin_env: str | None,
     prompt_pin: bool,
 ) -> None:
+    """Avvia la firma di un documento e restituisce il tentativo."""
     for _, _, x, y, width, height in placement:
         if not (
             0 <= x < 1
@@ -399,12 +415,14 @@ def signatures_create(
 @click.argument("job_id")
 @pass_context
 def signatures_status(ctx: Context, job_id: str) -> None:
+    """Mostra com'è andato un tentativo di firma."""
     emit(ctx, call(ctx, "GET", f"/signature-jobs/{job_id}"))
 
 
 @signatures.command("signer")
 @pass_context
 def signatures_signer(ctx: Context) -> None:
+    """Mostra il certificato che il servizio userebbe per firmare."""
     emit(ctx, call(ctx, "GET", "/signing-identity"))
 
 
@@ -416,6 +434,7 @@ def graphics() -> None:
 @graphics.command("list")
 @pass_context
 def graphics_list(ctx: Context) -> None:
+    """Elenca le firme grafiche utilizzabili."""
     emit(ctx, call(ctx, "GET", "/graphic-signatures"))
 
 
@@ -425,6 +444,7 @@ def graphics_list(ctx: Context) -> None:
 @click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
 @pass_context
 def graphics_download(ctx: Context, graphic_id: str, version: int, output: Path) -> None:
+    """Scarica l'immagine di una versione."""
     result = call(
         ctx,
         "GET",
@@ -442,6 +462,7 @@ def graphics_download(ctx: Context, graphic_id: str, version: int, output: Path)
 )
 @pass_context
 def graphics_create(ctx: Context, name: str, description: str, image: Path) -> None:
+    """Aggiunge una firma grafica al catalogo."""
     result = call(
         ctx,
         "POST",
@@ -460,6 +481,7 @@ def graphics_create(ctx: Context, name: str, description: str, image: Path) -> N
 @click.argument("active", type=click.BOOL)
 @pass_context
 def graphics_set_active(ctx: Context, graphic_id: str, active: bool) -> None:
+    """Attiva o disattiva una firma grafica."""
     emit(
         ctx, call(ctx, "PATCH", f"/admin/graphic-signatures/{graphic_id}", json={"active": active})
     )
@@ -478,6 +500,7 @@ def graphics_update(
     description: str | None,
     active: bool | None,
 ) -> None:
+    """Cambia nome e descrizione di una firma grafica."""
     body = {
         key: value
         for key, value in {"name": name, "description": description, "active": active}.items()
@@ -493,6 +516,7 @@ def graphics_update(
 @click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @pass_context
 def graphics_upload_version(ctx: Context, graphic_id: str, image: Path) -> None:
+    """Aggiunge una nuova versione dell'immagine."""
     emit(
         ctx,
         call(
@@ -509,6 +533,7 @@ def graphics_upload_version(ctx: Context, graphic_id: str, image: Path) -> None:
 @click.argument("version", type=click.IntRange(1))
 @pass_context
 def graphics_delete_version(ctx: Context, graphic_id: str, version: int) -> None:
+    """Elimina una versione; se è l'unica, l'intera firma grafica."""
     call(ctx, "DELETE", f"/admin/graphic-signatures/{graphic_id}/versions/{version}")
     emit(ctx, {"deleted": True, "graphic_id": graphic_id, "version": version})
 
@@ -523,6 +548,7 @@ def users() -> None:
 @click.option("--offset", default=0, type=click.IntRange(0))
 @pass_context
 def users_list(ctx: Context, limit: int, offset: int) -> None:
+    """Elenca gli account registrati e il loro ruolo."""
     emit(ctx, call(ctx, "GET", f"/admin/users?limit={limit}&offset={offset}"))
 
 
@@ -531,6 +557,7 @@ def users_list(ctx: Context, limit: int, offset: int) -> None:
 @click.argument("role", type=click.Choice(["no_access", "user", "admin"]))
 @pass_context
 def users_set_role(ctx: Context, user_id: str, role: str) -> None:
+    """Cambia il ruolo di un account."""
     emit(ctx, call(ctx, "PATCH", f"/admin/users/{user_id}/role", json={"role": role}))
 
 
@@ -549,6 +576,7 @@ def certificates_available(ctx: Context) -> None:
 @certificates.command("list")
 @pass_context
 def certificates_list(ctx: Context) -> None:
+    """Elenca i certificati configurati, con backend e stato."""
     emit(ctx, call(ctx, "GET", "/admin/signing-proxies"))
 
 
@@ -635,6 +663,7 @@ def certificates_discover(ctx: Context, library_path: str) -> None:
 @click.argument("active", type=click.BOOL)
 @pass_context
 def certificates_set_active(ctx: Context, proxy_id: str, active: bool) -> None:
+    """Attiva o disattiva un certificato."""
     emit(ctx, call(ctx, "PATCH", f"/admin/signing-proxies/{proxy_id}", json={"active": active}))
 
 
@@ -657,6 +686,7 @@ def certificates_update(
     certificate_label: str | None,
     active: bool | None,
 ) -> None:
+    """Cambia nome e parametri di un certificato."""
     body = {
         key: value
         for key, value in {
@@ -682,6 +712,7 @@ def certificates_update(
 def certificates_save_pin(
     ctx: Context, certificate_id: str, pin_env: str | None, prompt_pin: bool
 ) -> None:
+    """Salva il PIN di una carta, così non viene chiesto a ogni firma."""
     pin = read_pin(pin_env, prompt_pin)
     if pin is None:
         raise click.UsageError("Specifica --pin-env oppure --prompt-pin.")
@@ -700,6 +731,7 @@ def certificates_save_pin(
 @click.argument("certificate_id")
 @pass_context
 def certificates_remove_pin(ctx: Context, certificate_id: str) -> None:
+    """Dimentica il PIN salvato: verrà chiesto a ogni firma."""
     emit(
         ctx,
         call(
@@ -715,6 +747,7 @@ def certificates_remove_pin(ctx: Context, certificate_id: str) -> None:
 @click.argument("proxy_id")
 @pass_context
 def certificates_check(ctx: Context, proxy_id: str) -> None:
+    """Verifica che il certificato risponda, senza firmare nulla."""
     emit(ctx, call(ctx, "POST", f"/admin/signing-proxies/{proxy_id}/check"))
 
 
