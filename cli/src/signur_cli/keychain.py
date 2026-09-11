@@ -36,7 +36,7 @@ def save_token(value: str, key: str = TOKEN_KEY) -> None:
     try:
         keyring.set_password(SERVICE, key, value)
     except KeyringError as exc:
-        raise RuntimeError("Il portachiavi di sistema non è disponibile.") from exc
+        raise RuntimeError("The system keychain is not available.") from exc
 
 
 def delete_token(key: str = TOKEN_KEY) -> None:

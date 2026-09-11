@@ -18,7 +18,7 @@ class CliError(Exception):
     pass
 
 
-ESEMPI = """Esempi:
+EXAMPLES = """Examples:
   signur-admin users list
   signur-admin users set-role mario@esempio.it admin
   signur-admin users set-role 7a9c37cb-98c6-477c-8cf1-67271c281eba no_access
@@ -30,7 +30,7 @@ class _Parser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         self.print_help()
-        print(f"\nErrore: {message}", file=sys.stderr)
+        print(f"\nError: {message}", file=sys.stderr)
         raise SystemExit(2)
 
 
@@ -38,33 +38,33 @@ def _parser() -> _Parser:
     parser = _Parser(
         prog="signur-admin",
         description=(
-            "Amministrazione locale di Signur, da usare sulla macchina che lo ospita: "
-            "opera direttamente sul database, senza passare dall'interfaccia. Serve "
-            "quando non si riesce più a entrare, per esempio se l'ultimo "
-            "amministratore è stato declassato."
+            "Local administration for Signur, to be run on the machine hosting it: "
+            "it works straight on the database, without going through the interface. "
+            "It is there for when nobody can get in any more, say after the last "
+            "administrator was demoted."
         ),
-        epilog=ESEMPI,
+        epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", parser_class=_Parser)
     users = commands.add_parser(
         "users",
-        help="Elenca gli utenti e ne cambia il ruolo.",
-        description="Elenca gli utenti e ne cambia il ruolo.",
-        epilog=ESEMPI,
+        help="List the accounts and change their role.",
+        description="List the accounts and change their role.",
+        epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # Each group carries its own parser, so an incomplete command line can show
     # the help of the group that was asked for.
     users.set_defaults(group=users)
     user_commands = users.add_subparsers(dest="users_command")
-    user_commands.add_parser("list", help="Elenca gli utenti registrati.")
-    set_role = user_commands.add_parser("set-role", help="Cambia il ruolo di un utente.")
-    set_role.add_argument("identifier", help="UUID, nome utente o indirizzo email.")
+    user_commands.add_parser("list", help="List the registered accounts.")
+    set_role = user_commands.add_parser("set-role", help="Change the role of an account.")
+    set_role.add_argument("identifier", help="UUID, username or email address.")
     set_role.add_argument(
         "role",
         choices=[role.value for role in UserRole],
-        help="Il ruolo da assegnare.",
+        help="The role to assign.",
     )
     return parser
 
@@ -76,15 +76,15 @@ def _find_user(session: Session, identifier: str) -> User:
     filters.append(func.lower(User.email) == identifier.lower())
     matches = session.scalars(select(User).where(or_(*filters))).unique().all()
     if not matches:
-        raise CliError(f"Nessun utente corrisponde a {identifier!r}.")
+        raise CliError(f"No account matches {identifier!r}.")
     if len(matches) > 1:
-        raise CliError("L'identificativo non è univoco; usa l'UUID dell'utente.")
+        raise CliError("That identifier matches more than one account: use the UUID.")
     return matches[0]
 
 
 def _list_users(session: Session) -> None:
     users = session.scalars(select(User).order_by(User.first_seen_at, User.id)).all()
-    print("ID\tUID ESTERNO\tEMAIL\tRUOLO\tNOME")
+    print("ID\tUSERNAME\tEMAIL\tROLE\tNAME")
     for user in users:
         print(
             f"{user.id}\t{user.external_id}\t{user.email or '-'}\t"
@@ -136,7 +136,7 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             elif args.users_command == "set-role":
                 _set_role(session, args.identifier, UserRole(args.role))
     except CliError as exc:
-        print(f"Errore: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
         engine.dispose()

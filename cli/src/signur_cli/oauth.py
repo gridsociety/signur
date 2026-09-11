@@ -36,16 +36,16 @@ def _discovery() -> dict[str, Any]:
         response.raise_for_status()
         body = response.json()
         if not isinstance(body, dict):
-            raise OAuthError("La discovery OIDC non contiene un oggetto JSON.")
+            raise OAuthError("The OIDC discovery document is not a JSON object.")
         return body
     except (httpx.HTTPError, ValueError) as exc:
-        raise OAuthError("Discovery OIDC di Signur non disponibile.") from exc
+        raise OAuthError("Signur's OIDC discovery document is unavailable.") from exc
 
 
 def _token_from_body(body: dict[str, Any], previous: Token | None = None) -> Token:
     access_token = str(body.get("access_token", ""))
     if not access_token:
-        raise OAuthError("La risposta OAuth non contiene un access token.")
+        raise OAuthError("The OAuth response carries no access token.")
     expires_in = int(body.get("expires_in", 0))
     return Token(
         access_token=access_token,
@@ -76,7 +76,7 @@ def request_device_code() -> dict[str, Any]:
     discovery = _discovery()
     endpoint = str(discovery.get("device_authorization_endpoint", ""))
     if not endpoint:
-        raise OAuthError("Il provider non pubblica il device authorization endpoint.")
+        raise OAuthError("The provider publishes no device authorization endpoint.")
     try:
         response = httpx.post(
             endpoint,
@@ -89,9 +89,9 @@ def request_device_code() -> dict[str, Any]:
         response.raise_for_status()
         body = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise OAuthError("Impossibile avviare il device flow.") from exc
+        raise OAuthError("The device flow could not be started.") from exc
     if not isinstance(body, dict) or not body.get("device_code"):
-        raise OAuthError("Risposta device flow non valida.")
+        raise OAuthError("The device flow answered with something unusable.")
     return body
 
 
@@ -112,7 +112,7 @@ def poll_device_token(device: dict[str, Any]) -> Token:
             )
             body = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise OAuthError("Errore durante l'attesa dell'autenticazione.") from exc
+            raise OAuthError("Something went wrong while waiting for the authentication.") from exc
         if response.is_success and isinstance(body, dict):
             return _token_from_body(body)
         code = body.get("error") if isinstance(body, dict) else ""
@@ -146,7 +146,7 @@ def fresh_access_token() -> str:
         response.raise_for_status()
         body = response.json()
         if not isinstance(body, dict):
-            raise OAuthError("Risposta refresh non valida.")
+            raise OAuthError("The refresh answered with something unusable.")
         token = _token_from_body(body, token)
         save_token(token)
         return token.access_token

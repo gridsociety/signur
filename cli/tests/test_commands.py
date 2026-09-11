@@ -71,7 +71,7 @@ def test_graphic_signature_rejects_out_of_page_placement() -> None:
         ],
     )
     assert result.exit_code == 2
-    assert "rettangolo 0..1" in result.output
+    assert "0..1 rectangle" in result.output
 
 
 def test_admin_graphic_upload_and_user_role_are_exposed(monkeypatch, tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -260,7 +260,7 @@ def test_login_falls_back_to_oauth_when_the_server_uses_a_gateway(monkeypatch): 
     monkeypatch.setattr(oauth, "load_token", lambda: object())
     result = CliRunner().invoke(cli_main.root, ["auth", "login"], input="http://server/api/v1\n")
     assert result.exit_code == 0, result.output
-    assert "già presente" in result.output
+    assert "Already signed in" in result.output
 
 
 def test_every_command_says_what_it_does() -> None:
@@ -278,3 +278,14 @@ def test_every_command_says_what_it_does() -> None:
         return senza
 
     assert muti(root) == []
+
+
+def test_an_explicit_token_wins_over_a_stored_session(monkeypatch):  # type: ignore[no-untyped-def]
+    """Setting the variable is a deliberate act: it should not be quietly ignored."""
+    monkeypatch.setattr("signur_cli.client.keychain.load_session", lambda: "sessione-salvata")
+    monkeypatch.setenv("SIGNUR_API_TOKEN", "secret")
+
+    headers = Client("https://signur.example.org/api/v1")._headers()
+
+    assert headers["Authorization"] == "Bearer secret"
+    assert "Cookie" not in headers

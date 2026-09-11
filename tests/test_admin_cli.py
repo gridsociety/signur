@@ -61,7 +61,7 @@ def test_cli_reports_unknown_user_without_changing_data(tmp_path, capsys):  # ty
     engine.dispose()
 
     assert main(["users", "set-role", "missing", "admin"], settings) == 1
-    assert "Nessun utente" in capsys.readouterr().err
+    assert "No account matches" in capsys.readouterr().err
 
 
 def test_running_it_bare_explains_itself(capsys):  # type: ignore[no-untyped-def]
@@ -72,7 +72,7 @@ def test_running_it_bare_explains_itself(capsys):  # type: ignore[no-untyped-def
     assert code == 0
     assert "users" in stampato
     assert "set-role" in stampato
-    assert "Esempi" in stampato
+    assert "Examples" in stampato
 
 
 def test_a_group_without_a_command_shows_that_group(capsys):  # type: ignore[no-untyped-def]

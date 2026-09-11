@@ -30,11 +30,14 @@ class Client:
             "Origin": f"{parsed.scheme}://{parsed.netloc}",
             "X-Request-ID": f"cli-{uuid.uuid4()}",
         }
-        session_token = keychain.load_session()
-        if session_token:
-            headers["Cookie"] = f"{config.value('session_cookie_name')}={session_token}"
-            return headers
+        # An explicit token is a deliberate act, so it comes before a session left
+        # behind by an earlier sign in.
         api_token = os.environ.get("SIGNUR_API_TOKEN", "")
+        if not api_token:
+            session_token = keychain.load_session()
+            if session_token:
+                headers["Cookie"] = f"{config.value('session_cookie_name')}={session_token}"
+                return headers
         if api_token:
             basic_user = config.value("api_token_basic_user")
             if basic_user:
