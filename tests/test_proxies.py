@@ -37,7 +37,11 @@ def test_admin_manages_internal_signing_proxies(client, auth_headers, mutation_h
     created = client.post(
         "/api/v1/admin/signing-proxies",
         headers=mutation_headers("admin"),
-        json={"name": "Carta locale", "base_url": "http://127.0.0.1:9123"},
+        json={
+            "name": "Carta locale",
+            "backend": "pkcs11_web_proxy",
+            "base_url": "http://127.0.0.1:9123",
+        },
     )
     assert created.status_code == 201, created.text
     proxy = created.json()
@@ -63,7 +67,7 @@ def test_proxy_url_rejects_public_and_metadata_destinations(client, auth_headers
         response = client.post(
             "/api/v1/admin/signing-proxies",
             headers=mutation_headers("admin"),
-            json={"name": url, "base_url": url},
+            json={"name": url, "backend": "pkcs11_web_proxy", "base_url": url},
         )
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "proxy_address_forbidden"
@@ -80,7 +84,11 @@ def test_ordinary_user_cannot_manage_proxies(client, auth_headers, mutation_head
     response = client.post(
         "/api/v1/admin/signing-proxies",
         headers=mutation_headers("user"),
-        json={"name": "Vietato", "base_url": "http://127.0.0.1:9124"},
+        json={
+            "name": "Vietato",
+            "backend": "pkcs11_web_proxy",
+            "base_url": "http://127.0.0.1:9124",
+        },
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "admin_required"
@@ -201,3 +209,17 @@ def test_local_pkcs11_certificate_and_pin_lifecycle(
         assert b"654321" not in job.signing_pin_ciphertext
     finally:
         session_generator.close()
+
+
+def test_omitting_the_backend_means_the_local_middleware(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    """The typical install signs with a card on the same machine."""
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    response = client.post(
+        "/api/v1/admin/signing-proxies",
+        headers=mutation_headers("admin"),
+        json={"name": "Senza backend", "base_url": "http://127.0.0.1:9125"},
+    )
+    # A web proxy URL alone is no longer enough: the local backend wants a
+    # middleware and the labels that identify the certificate on the card.
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "pkcs11_selection_required"

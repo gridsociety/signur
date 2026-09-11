@@ -49,8 +49,9 @@ signur users list
 signur documents set-owner DOCUMENT_ID USER_ID
 ```
 
-Le configurazioni di firma sono esposte come `certificates` (`proxies` resta un alias). Per un
-middleware locale si può prima fare discovery e poi salvare le etichette restituite:
+Le configurazioni di firma sono esposte come `certificates` (`proxies` resta un alias). Il caso
+tipico è una carta inserita nella stessa macchina: si fa prima discovery e poi si salvano le
+etichette restituite.
 
 ```shell
 signur certificates libraries
@@ -59,6 +60,15 @@ signur certificates create-local --name "Carta locale" \
   --library-path /Library/bit4id/pkcs11/libbit4xpki.dylib \
   --token-label CNS --certificate-label "DS User Certificate3"
 ```
+
+Se invece la carta sta dietro un PKCS11 Web Proxy:
+
+```shell
+signur certificates create-web-proxy --name "Carta remota" --url http://127.0.0.1:9021
+```
+
+`create` resta come nome storico di `create-web-proxy`. Il backend viene sempre dichiarato
+esplicitamente dalla CLI: omettendolo, l'API assume il middleware locale.
 
 Il PIN non va passato come argomento visibile nella command line. Usare un prompt nascosto oppure
 il nome di una variabile d'ambiente:

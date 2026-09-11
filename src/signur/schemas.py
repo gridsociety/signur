@@ -252,7 +252,7 @@ class SigningIdentityView(BaseModel):
 
 class SigningProxyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    backend: CertificateBackend = CertificateBackend.PKCS11_WEB_PROXY
+    backend: CertificateBackend = CertificateBackend.LOCAL
     base_url: str | None = Field(default=None, min_length=1, max_length=1000)
     pkcs11_library_path: str | None = Field(default=None, min_length=1, max_length=2000)
     pkcs11_token_label: str | None = Field(default=None, min_length=1, max_length=255)

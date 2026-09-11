@@ -552,16 +552,27 @@ def certificates_list(ctx: Context) -> None:
     emit(ctx, call(ctx, "GET", "/admin/signing-proxies"))
 
 
-@certificates.command("create")
+@certificates.command("create-web-proxy")
 @click.option("--name", required=True)
 @click.option("--url", required=True)
 @pass_context
-def certificates_create(ctx: Context, name: str, url: str) -> None:
-    """Crea una configurazione PKCS11 Web Proxy (comando compatibile)."""
+def certificates_create_web_proxy(ctx: Context, name: str, url: str) -> None:
+    """Crea una configurazione PKCS11 Web Proxy (`create` e' il nome storico)."""
     emit(
         ctx,
-        call(ctx, "POST", "/admin/signing-proxies", json={"name": name, "base_url": url}),
+        call(
+            ctx,
+            "POST",
+            "/admin/signing-proxies",
+            # Dichiarato esplicitamente: il valore predefinito del server e'
+            # il middleware locale, che e' il caso tipico.
+            json={"name": name, "backend": "pkcs11_web_proxy", "base_url": url},
+        ),
     )
+
+
+# Nome storico del comando, mantenuto perche' non si rompano gli script.
+certificates.add_command(certificates_create_web_proxy, "create")
 
 
 @certificates.command("create-local")
@@ -581,6 +592,7 @@ def certificates_create_local(
     pin_env: str | None,
     prompt_pin: bool,
 ) -> None:
+    """Crea una configurazione con il middleware PKCS#11 locale."""
     pin = read_pin(pin_env, prompt_pin)
     body: dict[str, Any] = {
         "name": name,
