@@ -99,9 +99,15 @@ function renderDocuments(items) {
       `Proprietario: ${item.owner.display_name}`,
     ];
     if (item.signature_mode) metaParts.push(`Firma: ${signatureModeLabels[item.signature_mode] || item.signature_mode}`);
+    const signed = item.state === "signed";
+    if (signed) {
+      const shorthand = pdfaShorthand(item);
+      if (shorthand) metaParts.push(shorthand);
+    }
     meta.textContent = metaParts.join(" · ");
     description.append(name, meta);
-    const pdfaNote = pdfaWarning(item);
+    // The full warning is there to inform a decision, so only while one is pending.
+    const pdfaNote = signed ? null : pdfaWarning(item);
     if (pdfaNote) description.append(pdfaNote);
 
     const activeJob = activeDocumentJobs.get(item.id);
@@ -283,6 +289,13 @@ async function loadSigningResources() {
 
 function currentGraphicVersion(graphic) {
   return graphic?.versions.find((version) => version.version_number === graphic.current_version_number);
+}
+
+function pdfaShorthand(item) {
+  // Once the document is signed the warning has served its purpose: what is left
+  // is a fact about the file, and it belongs with the other small print.
+  if (!item || item.pdfa_status === "not_applicable" || item.pdfa_status === "conformant") return null;
+  return item.pdfa_status === "indeterminate" ? "PDF/A non verificato" : "non PDF/A";
 }
 
 function pdfaWarning(item) {
