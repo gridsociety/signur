@@ -21,8 +21,27 @@ logger = logging.getLogger(__name__)
 STATIC_ROOT = __file__.replace("main.py", "static")
 
 
+def configure_logging(root: logging.Logger | None = None) -> None:
+    """Send Signur's own logs to stderr, whatever started the server.
+
+    Uvicorn configures its own loggers and leaves the root one alone, so
+    without this the signature worker's INFO lines are dropped and its
+    warnings arrive bare, through the last-resort handler. A configuration
+    installed by whoever embeds Signur wins: a logger that already has a
+    handler is left as it is.
+    """
+    root = root if root is not None else logging.getLogger()
+    if root.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    configure_logging()
     settings = get_settings()
     settings.validate_security()
     settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
