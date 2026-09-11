@@ -1,10 +1,25 @@
 import ipaddress
+import os
+import sys
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def default_data_dir() -> Path:
+    """Return the per-user directory where Signur keeps its data."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "signur"
+
+
+def sqlite_url(path: PurePath) -> str:
+    return f"sqlite+pysqlite:///{path.as_posix()}"
 
 
 class Settings(BaseSettings):
@@ -18,11 +33,14 @@ class Settings(BaseSettings):
     app_name: str = "Signur"
     environment: str = "production"
     auth_mode: Literal["local", "forward_auth"] = "local"
-    database_url: str = "sqlite+pysqlite:///./var/signur.db"
+    data_dir: Path = Field(default_factory=default_data_dir)
+    database_url: str = Field(
+        default_factory=lambda data: sqlite_url(data["data_dir"] / "signur.db")
+    )
     auto_migrate: bool = True
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8000, ge=1, le=65535)
-    storage_root: Path = Path("./var/blobs")
+    storage_root: Path = Field(default_factory=lambda data: data["data_dir"] / "blobs")
     identity_authority: str = ""
     forward_auth_shared_secret: SecretStr = SecretStr("")
     allowed_origins: Annotated[tuple[str, ...], NoDecode] = ()
@@ -43,6 +61,11 @@ class Settings(BaseSettings):
     session_lifetime_hours: float = Field(default=12.0, gt=0, le=24 * 30)
     persistent_session_days: float = Field(default=365.0, gt=0, le=3650)
     session_cookie_secure: bool = False
+
+    @field_validator("data_dir", mode="after")
+    @classmethod
+    def expand_data_dir(cls, value: Path) -> Path:
+        return value.expanduser()
 
     @field_validator("allowed_origins", "trusted_gateway_ips", mode="before")
     @classmethod

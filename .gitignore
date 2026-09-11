@@ -53,5 +53,10 @@ junit.xml
 *.sqlite
 *.sqlite3
 
-# Signur local data
-/var/
+# Development documentation and planning: internal material that must not
+# reach the public repository
+docs/
+plans/
+specs/
+notes/
+design/

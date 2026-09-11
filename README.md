@@ -69,8 +69,9 @@ Signur: http://127.0.0.1:8000
 ```
 
 Aprilo nel browser. Non c'è nulla da configurare: Signur crea un database
-SQLite e una cartella privata sotto `./var`, applica da sé le migrazioni e crea
-l'account `admin`.
+SQLite e una cartella privata per i propri dati — `%APPDATA%\signur` su Windows,
+`~/.config/signur` altrove — applica da sé le migrazioni e crea l'account
+`admin`.
 
 **Quell'account `admin` iniziale non ha password.** Finché resta così Signur ti
 autentica da solo, ma soltanto da un browser sullo stesso computer: una
@@ -121,10 +122,16 @@ Ogni impostazione ha un valore predefinito funzionante: copia `.env.example` in
 `.env` solo se vuoi cambiare qualcosa. Tutte le variabili usano il prefisso
 `SIGNUR_`.
 
+`SIGNUR_DATA_DIR` sposta in un colpo solo database e documenti; dove non è
+impostata, fuori da Windows viene rispettata `XDG_CONFIG_HOME`. `SIGNUR_DATABASE_URL`
+e `SIGNUR_STORAGE_ROOT` restano indipendenti: dichiararle vince sulla cartella
+dei dati.
+
 | Variabile | Predefinito | A cosa serve |
 |---|---|---|
-| `SIGNUR_DATABASE_URL` | `sqlite+pysqlite:///./var/signur.db` | SQLite di default; PostgreSQL per installazioni più grandi |
-| `SIGNUR_STORAGE_ROOT` | `./var/blobs` | Dove vengono conservati originali e documenti firmati |
+| `SIGNUR_DATA_DIR` | `%APPDATA%\signur` su Windows, `~/.config/signur` altrove | Cartella dei dati: da qui derivano i due valori qui sotto |
+| `SIGNUR_DATABASE_URL` | `signur.db` nella cartella dei dati | SQLite di default; PostgreSQL per installazioni più grandi |
+| `SIGNUR_STORAGE_ROOT` | `blobs` nella cartella dei dati | Dove vengono conservati originali e documenti firmati |
 | `SIGNUR_BIND_HOST` / `SIGNUR_BIND_PORT` | `127.0.0.1` / `8000` | Indirizzo di ascolto |
 | `SIGNUR_AUTH_MODE` | `local` | `local` per gli account interni, `forward_auth` dietro un proxy che autentica |
 | `SIGNUR_AUTO_MIGRATE` | `true` | Applica le migrazioni all'avvio |

@@ -24,6 +24,7 @@ STATIC_ROOT = __file__.replace("main.py", "static")
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.validate_security()
+    settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     settings.storage_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not settings.pin_encryption_enabled:
         logger.warning(
