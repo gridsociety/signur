@@ -1,5 +1,8 @@
+import asyncio
+import contextlib
 import logging
-import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from signur.config import get_settings
 from signur.database import SessionLocal
@@ -23,18 +26,27 @@ def run_once() -> bool:
     return True
 
 
-def run() -> None:
-    settings = get_settings()
-    settings.validate_security()
-    logging.basicConfig(level=logging.INFO)
+async def _pump(poll_seconds: float) -> None:
+    """Work off the queue without blocking the event loop."""
+    while True:
+        try:
+            busy = await asyncio.to_thread(run_once)
+        except Exception:  # a failed job must never stop the pump
+            logger.exception("Signature job raised")
+            busy = False
+        if not busy:
+            await asyncio.sleep(poll_seconds)
+
+
+@asynccontextmanager
+async def running_worker(poll_seconds: float) -> AsyncIterator[None]:
+    """Run the signature worker for as long as the service is up."""
+    task = asyncio.create_task(_pump(poll_seconds))
     logger.info("Signur signature worker started")
     try:
-        while True:
-            if not run_once():
-                time.sleep(settings.worker_poll_seconds)
-    except KeyboardInterrupt:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         logger.info("Signur signature worker stopped")
-
-
-if __name__ == "__main__":
-    run()

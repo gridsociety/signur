@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from signur.audit import record_event
@@ -28,6 +28,7 @@ from signur.schemas import (
     SigningProxyAdminList,
     SigningProxyAdminView,
     SigningProxyCreate,
+    SigningProxyOrderUpdate,
     SigningProxyPublicList,
     SigningProxyPublicView,
     SigningProxyUpdate,
@@ -52,6 +53,8 @@ def _identity_view(identity: SigningIdentity) -> SigningIdentityView:
         not_valid_before=identity.certificate.not_valid_before_utc,
         not_valid_after=identity.certificate.not_valid_after_utc,
         certificate_sha256=identity.certificate_sha256,
+        key_bits=identity.key_bits,
+        intended_use=identity.intended_use,
     )
 
 
@@ -117,7 +120,7 @@ def list_available_proxies(
     proxies = session.scalars(
         select(SigningProxy)
         .where(SigningProxy.active.is_(True))
-        .order_by(SigningProxy.name, SigningProxy.id)
+        .order_by(SigningProxy.sort_order, SigningProxy.name, SigningProxy.id)
     ).all()
     items = [_check(proxy, settings) for proxy in proxies]
     return SigningProxyPublicList(items=items, total=len(items))
@@ -126,11 +129,46 @@ def list_available_proxies(
 @router.get("/admin/signing-proxies", response_model=SigningProxyAdminList)
 def list_admin_proxies(_admin: AdminUser, session: DbSession) -> SigningProxyAdminList:
     proxies = session.scalars(
-        select(SigningProxy).order_by(SigningProxy.name, SigningProxy.id)
+        select(SigningProxy).order_by(SigningProxy.sort_order, SigningProxy.name, SigningProxy.id)
     ).all()
     return SigningProxyAdminList(
         items=[SigningProxyAdminView.model_validate(proxy) for proxy in proxies],
         total=len(proxies),
+    )
+
+
+@router.put("/admin/signing-proxies/order", response_model=SigningProxyAdminList)
+def reorder_proxies(
+    request: Request,
+    body: SigningProxyOrderUpdate,
+    admin: AdminUser,
+    session: DbSession,
+) -> SigningProxyAdminList:
+    proxies = session.scalars(select(SigningProxy).with_for_update()).all()
+    by_id = {proxy.id: proxy for proxy in proxies}
+    if len(set(body.ids)) != len(body.ids) or set(body.ids) != set(by_id):
+        raise ApiError(
+            422,
+            "incomplete_certificate_order",
+            "Il nuovo ordine deve elencare ogni certificato una sola volta.",
+        )
+    before = [proxy.name for proxy in sorted(proxies, key=lambda item: item.sort_order)]
+    for position, proxy_id in enumerate(body.ids):
+        by_id[proxy_id].sort_order = position
+    ordered = [by_id[proxy_id] for proxy_id in body.ids]
+    record_event(
+        session,
+        actor=admin,
+        action="signing_proxy.reordered",
+        entity_type="signing_proxy",
+        entity_id="order",
+        request_id=request.state.request_id,
+        details={"before": before, "after": [proxy.name for proxy in ordered]},
+    )
+    session.commit()
+    return SigningProxyAdminList(
+        items=[SigningProxyAdminView.model_validate(proxy) for proxy in ordered],
+        total=len(ordered),
     )
 
 
@@ -181,7 +219,14 @@ def create_proxy(
                 )
             except SecretBoxError as exc:
                 raise ApiError(503, "pin_encryption_unavailable", str(exc)) from exc
-    proxy = SigningProxy(active=True, version=1, created_by=admin, **values)
+    last_position = session.scalar(select(func.max(SigningProxy.sort_order)))
+    proxy = SigningProxy(
+        active=True,
+        version=1,
+        sort_order=0 if last_position is None else last_position + 1,
+        created_by=admin,
+        **values,
+    )
     session.add(proxy)
     record_event(
         session,

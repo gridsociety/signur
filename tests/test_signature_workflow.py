@@ -35,7 +35,9 @@ from signur.models import (
     SigningProxy,
     User,
     UserRole,
+    XadesPackaging,
 )
+from signur.pades import verify_pades_b_b
 from signur.secret_box import seal_pin
 from signur.signature_service import (
     PlacementSpec,
@@ -45,6 +47,7 @@ from signur.signature_service import (
 )
 from signur.signing_proxy import ProxySigningError, SigningIdentity
 from signur.storage import LocalBlobStorage
+from signur.xades import verify_xades_b_b
 
 
 class FakeSigningClient:
@@ -80,7 +83,12 @@ class FakeSigningClient:
         return self.key.sign(digest, padding.PKCS1v15(), utils.Prehashed(hashes.SHA256()))
 
 
-def _setup(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.UUID, uuid.UUID, bytes]:
+def _setup(
+    tmp_path: Path,
+    original: bytes = b"documento da firmare\x00",
+    input_format: InputFormat = InputFormat.OPAQUE,
+    original_name: str = "documento.bin",
+) -> tuple[sessionmaker[Session], Settings, uuid.UUID, uuid.UUID, bytes]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -90,7 +98,6 @@ def _setup(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.UUID, 
         pin_encryption_key="test-pin-encryption-key-with-at-least-32-characters",
     )
     storage = LocalBlobStorage(settings.storage_root, settings.max_upload_bytes)
-    original = b"documento da firmare\x00"
     stored = storage.store_bytes(original)
     user_id = uuid.uuid4()
     document_id = uuid.uuid4()
@@ -116,8 +123,8 @@ def _setup(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.UUID, 
                     id=document_id,
                     owner=user,
                     uploaded_by=user,
-                    original_name="documento.bin",
-                    input_format=InputFormat.OPAQUE,
+                    original_name=original_name,
+                    input_format=input_format,
                     detected_media_type="application/octet-stream",
                     original_blob=blob,
                     sha256=stored.sha256,
@@ -182,6 +189,7 @@ def test_cades_job_persists_verified_artifact_and_signer_snapshot(tmp_path: Path
         assert document.signature_mode is SignatureMode.CADES
         assert completed.status is SignatureJobStatus.COMPLETED
         assert completed.signing_display_name == "Mario Firmatario"
+        assert completed.signing_key_bits == 2048
         assert completed.signing_certificate_der
         assert artifact is not None
         result = (
@@ -278,7 +286,8 @@ def test_local_pkcs11_job_decrypts_pin_and_clears_ephemeral_copy(
     }
 
 
-def test_graphic_job_produces_pdf_without_using_signing_proxy(tmp_path: Path) -> None:
+def _pdf_setup(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, LocalBlobStorage, bytes]:
+    """A PDF document with one catalogue graphic, ready for a graphic or PAdES job."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -348,6 +357,12 @@ def test_graphic_job_produces_pdf_without_using_signing_proxy(tmp_path: Path) ->
         )
         session.add_all([document, version])
 
+    return factory, settings, storage, original
+
+
+def test_graphic_job_produces_pdf_without_using_signing_proxy(tmp_path: Path) -> None:
+    factory, settings, storage, original = _pdf_setup(tmp_path)
+
     with factory() as session:
         user = session.scalar(select(User).where(User.external_id == "graphic-operator"))
         document = session.scalar(select(Document))
@@ -375,3 +390,105 @@ def test_graphic_job_produces_pdf_without_using_signing_proxy(tmp_path: Path) ->
         assert artifact.media_type == "application/pdf"
         result = storage.path_for(artifact.blob.storage_key).read_bytes()
         assert result.startswith(original)
+
+
+def test_pades_job_signs_the_pdf_with_the_chosen_graphic(tmp_path: Path) -> None:
+    factory, settings, storage, original = _pdf_setup(tmp_path)
+
+    with factory() as session:
+        user = session.scalar(select(User).where(User.external_id == "graphic-operator"))
+        document = session.scalar(select(Document))
+        version = session.scalar(select(GraphicSignatureVersion))
+        assert user is not None and document is not None and version is not None
+        job = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.PADES,
+            request_id=str(uuid.uuid4()),
+            placements=[PlacementSpec(version, 1, 0.1, 0.7, 0.25, 0.12, 0)],
+        )
+
+    with factory() as session:
+        assert claim_next_signature(session) == job.id
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job.id, FakeSigningClient()) is True
+
+    with factory() as session:
+        completed = session.get_one(SignatureJob, job.id)
+        document = session.get_one(Document, completed.document_id)
+        artifact = session.scalar(select(SignedArtifact))
+        assert completed.status is SignatureJobStatus.COMPLETED
+        assert completed.signing_display_name == "Mario Firmatario"
+        assert document.state is DocumentState.SIGNED
+        assert artifact is not None
+        assert artifact.media_type == "application/pdf"
+        assert artifact.filename == "documento-firmato.pdf"
+        result = storage.path_for(artifact.blob.storage_key).read_bytes()
+
+    verify_pades_b_b(result, original)
+
+
+def test_pades_on_a_file_that_is_not_a_pdf_explains_itself(tmp_path: Path) -> None:
+    factory, settings, user_id, document_id, _original = _setup(tmp_path)
+
+    with factory() as session:
+        document = session.get_one(Document, document_id)
+        user = session.get_one(User, user_id)
+        job = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.PADES,
+            request_id=str(uuid.uuid4()),
+        )
+
+    with factory() as session:
+        assert claim_next_signature(session) == job.id
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job.id, FakeSigningClient()) is False
+
+    with factory() as session:
+        failed = session.get_one(SignatureJob, job.id)
+        assert failed.status is SignatureJobStatus.FAILED
+        assert failed.error_code == "pades_generation_failed"
+
+
+def test_xades_job_produces_a_signed_xml(tmp_path: Path) -> None:
+    original = b'<?xml version="1.0"?><fattura><riga importo="10,00">uno</riga></fattura>'
+    factory, settings, user_id, document_id, _original = _setup(
+        tmp_path, original=original, input_format=InputFormat.XML, original_name="fattura.xml"
+    )
+
+    with factory() as session:
+        document = session.get_one(Document, document_id)
+        user = session.get_one(User, user_id)
+        job = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.XADES,
+            xades_packaging=XadesPackaging.ENVELOPING,
+            request_id=str(uuid.uuid4()),
+        )
+
+    with factory() as session:
+        assert claim_next_signature(session) == job.id
+    card = FakeSigningClient()
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job.id, card) is True
+
+    with factory() as session:
+        completed = session.get_one(SignatureJob, job.id)
+        artifact = session.scalar(select(SignedArtifact))
+        assert completed.status is SignatureJobStatus.COMPLETED
+        assert artifact is not None
+        assert artifact.media_type == "application/xml"
+        assert artifact.filename == "fattura-firmato.xml"
+        result = (
+            LocalBlobStorage(settings.storage_root, settings.max_upload_bytes)
+            .path_for(artifact.blob.storage_key)
+            .read_bytes()
+        )
+
+    verify_xades_b_b(result, original, XadesPackaging.ENVELOPING, card.identity)

@@ -10,9 +10,11 @@ from signur.models import (
     CertificateBackend,
     DocumentState,
     InputFormat,
+    PdfaStatus,
     SignatureJobStatus,
     SignatureMode,
     UserRole,
+    XadesPackaging,
 )
 
 
@@ -143,6 +145,9 @@ class DocumentView(BaseModel):
     analysis_status: AnalysisStatus
     capabilities: list[str]
     analysis_warnings: list[str]
+    pdfa_status: PdfaStatus
+    pdfa_declared_part: str | None
+    pdfa_violations: list[str]
     version: int
     created_at: datetime
     completed_at: datetime | None
@@ -192,6 +197,7 @@ class PlacementView(BaseModel):
 class SignatureCreate(BaseModel):
     mode: SignatureMode = SignatureMode.CADES
     cades_strategy: CadesStrategy | None = None
+    xades_packaging: XadesPackaging | None = None
     placements: list[PlacementCreate] = Field(default_factory=list, max_length=100)
     signing_proxy_id: uuid.UUID | None = None
     pin: SecretStr | None = None
@@ -202,8 +208,14 @@ class SignatureCreate(BaseModel):
             raise ValueError("La firma grafica richiede almeno un posizionamento.")
         if self.mode in {SignatureMode.CADES, SignatureMode.XADES} and self.placements:
             raise ValueError("Questa modalità non ammette posizionamenti grafici.")
+        if self.mode is SignatureMode.PADES and len(self.placements) > 1:
+            raise ValueError(
+                "La firma PAdES ammette una sola immagine, che diventa l'aspetto della firma."
+            )
         if self.cades_strategy is not None and self.mode is not SignatureMode.CADES:
             raise ValueError("La strategia CAdES è valida soltanto per la modalità CAdES.")
+        if self.xades_packaging is not None and self.mode is not SignatureMode.XADES:
+            raise ValueError("Il tipo di firma XML è valido soltanto per la modalità XAdES.")
         if len({placement.order for placement in self.placements}) != len(self.placements):
             raise ValueError("L'ordine dei posizionamenti deve essere univoco.")
         return self
@@ -220,6 +232,7 @@ class SignatureJobView(BaseModel):
     attempt_number: int
     mode: SignatureMode
     cades_strategy: CadesStrategy | None
+    xades_packaging: XadesPackaging | None
     status: SignatureJobStatus
     document_version: int
     document_sha256: str
@@ -246,6 +259,8 @@ class SigningIdentityView(BaseModel):
     not_valid_before: datetime
     not_valid_after: datetime
     certificate_sha256: str
+    key_bits: int | None = None
+    intended_use: str | None = None
     digest_algorithm: str = "SHA-256"
     signature_algorithm: str = "RSASSA-PKCS1-v1_5"
 
@@ -272,6 +287,10 @@ class SigningProxyUpdate(BaseModel):
     pin: SecretStr | None = None
 
 
+class SigningProxyOrderUpdate(BaseModel):
+    ids: list[uuid.UUID]
+
+
 class SigningProxyAdminView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -284,6 +303,7 @@ class SigningProxyAdminView(BaseModel):
     pkcs11_certificate_label: str | None
     pin_saved: bool
     active: bool
+    sort_order: int
     version: int
     created_by_user_id: uuid.UUID | None
     created_at: datetime

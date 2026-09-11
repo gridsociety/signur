@@ -188,6 +188,10 @@
               <button class="button primary" type="submit">Aggiungi certificato</button>
             </div>
           </form>
+          <p id="certificate-order-help" class="field-help" hidden>
+            Il primo certificato dell’elenco è quello proposto per impostazione predefinita quando si firma.
+            Trascina la maniglia ⠿ o usa le frecce per cambiare l’ordine.
+          </p>
           <section id="proxies-admin" class="admin-list" aria-live="polite"></section>
         </section>
       </section>
@@ -220,18 +224,28 @@
           </div>
           <div class="sign-fields">
             <label class="field" for="signature-mode">Modalità<select id="signature-mode" required></select></label>
+            <label id="xades-packaging-field" class="field" for="xades-packaging" hidden>Tipo di firma XML
+              <select id="xades-packaging">
+                <option value="enveloped">Enveloped — firma dentro l'XML</option>
+                <option value="enveloping">Enveloping — nuovo XML contenitore</option>
+              </select>
+            </label>
             <label id="cades-strategy-field" class="field" for="cades-strategy" hidden>Tipo di firma CAdES
               <select id="cades-strategy">
                 <option value="nested">Matrioska — firma l'intero P7M</option>
                 <option value="parallel">Parallela — affianca le firme esistenti</option>
               </select>
             </label>
-            <p id="unavailable-modes" class="callout" hidden></p>
             <div id="proxy-field">
               <label id="proxy-selector-field" class="field" for="signing-proxy">Certificato di firma<select id="signing-proxy"></select></label>
               <div id="selected-signer" class="identity-summary"></div>
               <label id="signing-pin-field" class="field" for="signing-pin" hidden>PIN della smart card<input id="signing-pin" type="password" inputmode="numeric" autocomplete="off"></label>
             </div>
+            <label id="pades-graphic-field" class="field checkbox-field" for="pades-graphic" hidden>
+              <input id="pades-graphic" type="checkbox">
+              <span>Aggiungi una firma grafica visibile</span>
+            </label>
+            <p id="pades-graphic-note" class="muted" hidden></p>
             <div id="graphic-fields" hidden>
               <label class="field" for="graphic-signature">Firma grafica<select id="graphic-signature"></select></label>
               <div class="placement-tools">
@@ -241,6 +255,7 @@
               <p class="muted">Trascina la firma sul documento e usa la maniglia nell'angolo per ridimensionarla. Ingrandisci l'anteprima per una maggiore precisione.</p>
               <ol id="placements" class="placements"></ol>
             </div>
+            <div id="sign-pdfa"></div>
             <div id="sign-summary" class="confirmation-summary"></div>
           </div>
         </div>

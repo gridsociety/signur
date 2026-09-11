@@ -27,11 +27,19 @@ from signur.models import (
     SigningProxy,
     User,
     UserRole,
+    XadesPackaging,
 )
+from signur.pades import PadesError, build_pades_b_b, verify_pades_b_b
 from signur.proxy_security import validate_proxy_url
 from signur.secret_box import SecretBoxError, unseal_pin
-from signur.signing_proxy import ProxySigningError, SigningClient, SigningProxyClient
+from signur.signing_proxy import (
+    ProxySigningError,
+    SigningClient,
+    SigningIdentity,
+    SigningProxyClient,
+)
 from signur.storage import LocalBlobStorage
+from signur.xades import XadesError, build_xades_b_b, verify_xades_b_b
 
 ACTIVE_JOB_STATUSES = (SignatureJobStatus.QUEUED, SignatureJobStatus.RUNNING)
 
@@ -55,6 +63,7 @@ def enqueue_signature(
     mode: SignatureMode,
     request_id: str,
     cades_strategy: CadesStrategy | None = None,
+    xades_packaging: XadesPackaging | None = None,
     placements: list[PlacementSpec] | None = None,
     signing_proxy: SigningProxy | None = None,
     signing_pin_ciphertext: bytes | None = None,
@@ -86,6 +95,7 @@ def enqueue_signature(
         attempt_number=(last_attempt or 0) + 1,
         mode=mode,
         cades_strategy=cades_strategy,
+        xades_packaging=xades_packaging,
         status=SignatureJobStatus.QUEUED,
         document_version=locked_document.version,
         document_sha256=locked_document.sha256,
@@ -121,6 +131,7 @@ def enqueue_signature(
             "attempt_number": job.attempt_number,
             "mode": mode.value,
             "cades_strategy": cades_strategy.value if cades_strategy is not None else None,
+            "xades_packaging": xades_packaging.value if xades_packaging is not None else None,
         },
     )
     session.commit()
@@ -160,11 +171,97 @@ def _failure_details(exc: Exception) -> tuple[str, str]:
         return "proxy_signing_failed", "Il servizio di firma non ha completato l'operazione."
     if isinstance(exc, CadesError):
         return "cades_generation_failed", "Il file firmato non ha superato la verifica."
+    if isinstance(exc, PadesError):
+        return "pades_generation_failed", "Il PDF firmato non ha superato la verifica."
+    if isinstance(exc, XadesError):
+        return "xades_generation_failed", "L'XML firmato non ha superato la verifica."
     if isinstance(exc, GraphicPdfError):
         return "graphic_generation_failed", "Il PDF grafico non ha superato la verifica."
     if isinstance(exc, OSError):
         return "storage_failed", "Il risultato non può essere salvato."
     return "signing_failed", "Firma non riuscita."
+
+
+def _load_placement(storage: LocalBlobStorage, placement: Placement) -> GraphicPlacement:
+    """Read the catalogue image a placement points at."""
+    version = placement.graphic_signature_version
+    png = storage.path_for(version.blob.storage_key).read_bytes()
+    if len(png) != version.blob.size_bytes:
+        raise OSError("graphic size mismatch")
+    return GraphicPlacement(
+        page=placement.page,
+        x=placement.x,
+        y=placement.y,
+        width=placement.width,
+        height=placement.height,
+        layer_order=placement.layer_order,
+        png=png,
+    )
+
+
+def _acquire_signing_identity(
+    session: Session,
+    job: SignatureJob,
+    settings: Settings,
+    client: SigningClient | None,
+) -> tuple[SigningClient, SigningIdentity, bool]:
+    """Open the card, read the identity and freeze it on the job."""
+    signing_client: SigningClient
+    if client is not None:
+        signing_client = client
+    elif job.signing_proxy is not None and job.signing_proxy.backend is CertificateBackend.LOCAL:
+        proxy = job.signing_proxy
+        if not (
+            proxy.pkcs11_library_path
+            and proxy.pkcs11_token_label
+            and proxy.pkcs11_certificate_label
+        ):
+            raise ProxySigningError("La configurazione PKCS#11 locale è incompleta.")
+        ciphertext = job.signing_pin_ciphertext or proxy.saved_pin_ciphertext
+        if ciphertext is None:
+            raise LocalPkcs11SigningError(
+                "pkcs11_pin_required",
+                "Il PIN della smart card è richiesto.",
+            )
+        try:
+            pin = unseal_pin(ciphertext, settings.pin_encryption_key)
+        except SecretBoxError as exc:
+            raise LocalPkcs11SigningError(
+                "pkcs11_configuration_failed",
+                "Il PIN salvato non è utilizzabile: chiedi a un amministratore di sostituirlo.",
+            ) from exc
+        signing_client = LocalPkcs11SigningClient(
+            proxy.pkcs11_library_path,
+            proxy.pkcs11_token_label,
+            proxy.pkcs11_certificate_label,
+            pin,
+        )
+    else:
+        proxy_url = (
+            validate_proxy_url(job.signing_proxy.base_url)
+            if job.signing_proxy is not None and job.signing_proxy.base_url is not None
+            else settings.signing_proxy_url
+        )
+        signing_client = SigningProxyClient(proxy_url, settings.signing_proxy_timeout_seconds)
+    own_client = client is None
+    identity = signing_client.get_identity()
+    identity_job = session.scalar(
+        select(SignatureJob).where(SignatureJob.id == job.id).with_for_update()
+    )
+    if identity_job is None or identity_job.status is not SignatureJobStatus.RUNNING:
+        raise CadesError("Il tentativo non è più attivo.")
+    identity_job.signing_identity_sha256 = identity.certificate_sha256
+    identity_job.signing_certificate_der = identity.certificate_der
+    identity_job.signing_display_name = identity.display_name
+    identity_job.signing_subject = identity.subject
+    identity_job.signing_issuer = identity.issuer
+    identity_job.signing_serial_number = identity.serial_number
+    identity_job.signing_key_bits = identity.key_bits
+    identity_job.signing_not_valid_before = identity.certificate.not_valid_before_utc
+    identity_job.signing_not_valid_after = identity.certificate.not_valid_after_utc
+    identity_job.signing_pin_ciphertext = None
+    session.commit()
+    return signing_client, identity, own_client
 
 
 def process_claimed_signature(
@@ -203,97 +300,40 @@ def process_claimed_signature(
         ):
             raise ApiError(403, "access_revoked", "L'operatore non è più autorizzato.")
 
-        identity = None
-        if job.mode is SignatureMode.CADES:
-            if client is not None:
-                signing_client = client
-            elif (
-                job.signing_proxy is not None
-                and job.signing_proxy.backend is CertificateBackend.LOCAL
-            ):
-                proxy = job.signing_proxy
-                if not (
-                    proxy.pkcs11_library_path
-                    and proxy.pkcs11_token_label
-                    and proxy.pkcs11_certificate_label
-                ):
-                    raise ProxySigningError("La configurazione PKCS#11 locale è incompleta.")
-                ciphertext = job.signing_pin_ciphertext or proxy.saved_pin_ciphertext
-                if ciphertext is None:
-                    raise LocalPkcs11SigningError(
-                        "pkcs11_pin_required",
-                        "Il PIN della smart card è richiesto.",
-                    )
-                try:
-                    pin = unseal_pin(ciphertext, settings.pin_encryption_key)
-                except SecretBoxError as exc:
-                    raise LocalPkcs11SigningError(
-                        "pkcs11_configuration_failed",
-                        "Il PIN salvato non è utilizzabile: chiedi a un amministratore "
-                        "di sostituirlo.",
-                    ) from exc
-                signing_client = LocalPkcs11SigningClient(
-                    proxy.pkcs11_library_path,
-                    proxy.pkcs11_token_label,
-                    proxy.pkcs11_certificate_label,
-                    pin,
-                )
+        identity: SigningIdentity | None = None
+        if job.mode in {SignatureMode.CADES, SignatureMode.PADES, SignatureMode.XADES}:
+            card, identity, own_client = _acquire_signing_identity(session, job, settings, client)
+            signing_client = card
+            if job.mode is SignatureMode.CADES:
+                if job.cades_strategy is CadesStrategy.PARALLEL:
+                    result = build_cades_parallel_b_b(original, card, identity)
+                else:
+                    result = build_cades_b_b(original, card, identity)
+                media_type = "application/pkcs7-mime"
+                if job.cades_strategy is CadesStrategy.PARALLEL:
+                    name = job.document.original_name
+                    stem = name[:-4] if name.lower().endswith(".p7m") else name
+                    filename = f"{stem}-firmato.p7m"
+                else:
+                    filename = f"{job.document.original_name}.p7m"
+            elif job.mode is SignatureMode.PADES:
+                placement = _load_placement(storage, job.placements[0]) if job.placements else None
+                result = build_pades_b_b(original, card, identity, placement)
+                verify_pades_b_b(result, original)
+                media_type = "application/pdf"
+                stem = job.document.original_name.removesuffix(".pdf")
+                filename = f"{stem}-firmato.pdf"
             else:
-                proxy_url = (
-                    validate_proxy_url(job.signing_proxy.base_url)
-                    if job.signing_proxy is not None and job.signing_proxy.base_url is not None
-                    else settings.signing_proxy_url
-                )
-                signing_client = SigningProxyClient(
-                    proxy_url, settings.signing_proxy_timeout_seconds
-                )
-            own_client = client is None
-            identity = signing_client.get_identity()
-            identity_job = session.scalar(
-                select(SignatureJob).where(SignatureJob.id == job_id).with_for_update()
-            )
-            if identity_job is None or identity_job.status is not SignatureJobStatus.RUNNING:
-                raise CadesError("Il tentativo non è più attivo.")
-            identity_job.signing_identity_sha256 = identity.certificate_sha256
-            identity_job.signing_certificate_der = identity.certificate_der
-            identity_job.signing_display_name = identity.display_name
-            identity_job.signing_subject = identity.subject
-            identity_job.signing_issuer = identity.issuer
-            identity_job.signing_serial_number = identity.serial_number
-            identity_job.signing_not_valid_before = identity.certificate.not_valid_before_utc
-            identity_job.signing_not_valid_after = identity.certificate.not_valid_after_utc
-            identity_job.signing_pin_ciphertext = None
-            session.commit()
-            if job.cades_strategy is CadesStrategy.PARALLEL:
-                result = build_cades_parallel_b_b(original, signing_client, identity)
-            else:
-                result = build_cades_b_b(original, signing_client, identity)
-            media_type = "application/pkcs7-mime"
-            if job.cades_strategy is CadesStrategy.PARALLEL:
-                name = job.document.original_name
-                stem = name[:-4] if name.lower().endswith(".p7m") else name
-                filename = f"{stem}-firmato.p7m"
-            else:
-                filename = f"{job.document.original_name}.p7m"
+                packaging = job.xades_packaging or XadesPackaging.ENVELOPED
+                result = build_xades_b_b(original, card, identity, packaging)
+                verify_xades_b_b(result, original, packaging, identity)
+                media_type = "application/xml"
+                stem = job.document.original_name.removesuffix(".xml")
+                filename = f"{stem}-firmato.xml"
         elif job.mode is SignatureMode.GRAPHIC:
-            graphic_placements = []
-            for placement in job.placements:
-                version = placement.graphic_signature_version
-                png = storage.path_for(version.blob.storage_key).read_bytes()
-                if len(png) != version.blob.size_bytes:
-                    raise OSError("graphic size mismatch")
-                graphic_placements.append(
-                    GraphicPlacement(
-                        page=placement.page,
-                        x=placement.x,
-                        y=placement.y,
-                        width=placement.width,
-                        height=placement.height,
-                        layer_order=placement.layer_order,
-                        png=png,
-                    )
-                )
-            result = apply_graphics(original, graphic_placements)
+            result = apply_graphics(
+                original, [_load_placement(storage, item) for item in job.placements]
+            )
             media_type = "application/pdf"
             stem = job.document.original_name.removesuffix(".pdf")
             filename = f"{stem}-firmato.pdf"

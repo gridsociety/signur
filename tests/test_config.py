@@ -90,3 +90,10 @@ def test_explicit_settings_win_over_the_data_directory(
 
     assert settings.database_url == "postgresql+psycopg://signur@127.0.0.1/signur"
     assert settings.storage_root == Path("/srv/blobs")
+
+
+def test_the_configuration_file_is_visible_in_the_config_folder() -> None:
+    """Not a dotfile buried in the working directory: a plain file where the data lives."""
+    files = Settings.model_config["env_file"]
+
+    assert files[0] == default_data_dir() / "signur.env"

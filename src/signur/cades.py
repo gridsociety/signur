@@ -1,38 +1,15 @@
 import asyncio
-import hashlib
 from typing import cast
 
-from asn1crypto import algos, cms, x509  # type: ignore[import-untyped]
-from pyhanko.sign import signers, validation
+from asn1crypto import cms  # type: ignore[import-untyped]
+from pyhanko.sign import validation
 
+from signur.proxy_signer import SIGNATURE_ALGORITHM_POLICY, ProxySigner
 from signur.signing_proxy import SigningClient, SigningIdentity
 
 
 class CadesError(Exception):
     pass
-
-
-class ProxySigner(signers.Signer):
-    def __init__(self, client: SigningClient, identity: SigningIdentity) -> None:
-        super().__init__(
-            signing_cert=x509.Certificate.load(identity.certificate_der),
-            cert_registry=None,
-            signature_mechanism=algos.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
-            prefer_pss=False,
-            embed_roots=False,
-        )
-        self._client = client
-        self._identity = identity
-
-    async def async_sign_raw(
-        self, data: bytes, digest_algorithm: str, dry_run: bool = False
-    ) -> bytes:
-        if digest_algorithm.lower() != "sha256":
-            raise CadesError("Signur supporta soltanto SHA-256.")
-        if dry_run:
-            return bytes(self._identity.signature_length)
-        digest = hashlib.sha256(data).digest()
-        return await asyncio.to_thread(self._client.sign_digest, digest, self._identity)
 
 
 async def build_cades_b_b_async(
@@ -131,7 +108,10 @@ async def verify_cades_b_b_async(container: bytes, expected_content: bytes) -> N
         required = {"content_type", "message_digest", "signing_certificate_v2"}
         if not required.issubset(signed_attribute_types):
             raise CadesError("Mancano attributi firmati obbligatori CAdES-B-B.")
-        status = await validation.async_validate_cms_signature(signed_data)
+        status = await validation.async_validate_cms_signature(
+            signed_data,
+            algorithm_policy=SIGNATURE_ALGORITHM_POLICY,  # type: ignore[call-overload]
+        )
         if not status.intact or not status.valid:
             raise CadesError("La verifica crittografica del CAdES è fallita.")
     except CadesError:

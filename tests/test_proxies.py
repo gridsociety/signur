@@ -6,6 +6,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from fake_card import authentication_key_usage, signing_key_usage
 from sqlalchemy import select
 
 from signur.database import get_session
@@ -14,11 +15,11 @@ from signur.models import SignatureJob
 from signur.signing_proxy import SigningIdentity
 
 
-def _identity() -> SigningIdentity:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def _identity(key_size: int = 2048, key_usage: x509.KeyUsage | None = None) -> SigningIdentity:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Certificato locale")])
     now = datetime.now(UTC)
-    certificate = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(name)
         .issuer_name(name)
@@ -26,10 +27,12 @@ def _identity() -> SigningIdentity:
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=1))
         .not_valid_after(now + timedelta(days=1))
-        .sign(key, hashes.SHA256())
     )
+    if key_usage is not None:
+        builder = builder.add_extension(key_usage, critical=True)
+    certificate = builder.sign(key, hashes.SHA256())
     der = certificate.public_bytes(serialization.Encoding.DER)
-    return SigningIdentity(der, hashlib.sha256(der).hexdigest(), certificate, 256)
+    return SigningIdentity(der, hashlib.sha256(der).hexdigest(), certificate, key_size // 8)
 
 
 def test_admin_manages_internal_signing_proxies(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
@@ -223,3 +226,176 @@ def test_omitting_the_backend_means_the_local_middleware(client, auth_headers, m
     # middleware and the labels that identify the certificate on the card.
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "pkcs11_selection_required"
+
+
+def _web_proxy(client, mutation_headers, name: str, port: int) -> dict:  # type: ignore[no-untyped-def]
+    response = client.post(
+        "/api/v1/admin/signing-proxies",
+        headers=mutation_headers("admin"),
+        json={
+            "name": name,
+            "backend": "pkcs11_web_proxy",
+            "base_url": f"http://127.0.0.1:{port}",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_admin_reorders_the_signing_proxies(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    first = _web_proxy(client, mutation_headers, "Anna", 9201)
+    second = _web_proxy(client, mutation_headers, "Bruno", 9202)
+    third = _web_proxy(client, mutation_headers, "Carla", 9203)
+
+    # New certificates queue up behind the ones already configured.
+    listing = client.get("/api/v1/admin/signing-proxies", headers=auth_headers("admin")).json()
+    assert [item["name"] for item in listing["items"]] == ["Anna", "Bruno", "Carla"]
+    assert [item["sort_order"] for item in listing["items"]] == [0, 1, 2]
+
+    reordered = client.put(
+        "/api/v1/admin/signing-proxies/order",
+        headers=mutation_headers("admin"),
+        json={"ids": [third["id"], first["id"], second["id"]]},
+    )
+    assert reordered.status_code == 200, reordered.text
+    assert [item["name"] for item in reordered.json()["items"]] == ["Carla", "Anna", "Bruno"]
+    assert [item["sort_order"] for item in reordered.json()["items"]] == [0, 1, 2]
+
+    listing = client.get("/api/v1/admin/signing-proxies", headers=auth_headers("admin")).json()
+    assert [item["name"] for item in listing["items"]] == ["Carla", "Anna", "Bruno"]
+
+    # The order an admin chose is the order everybody signing sees.
+    available = client.get("/api/v1/signing-proxies", headers=auth_headers("admin")).json()
+    assert [item["name"] for item in available["items"]] == ["Carla", "Anna", "Bruno"]
+
+
+def test_reordering_wants_every_certificate_exactly_once(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    first = _web_proxy(client, mutation_headers, "Anna", 9211)
+    _web_proxy(client, mutation_headers, "Bruno", 9212)
+
+    for ids in ([first["id"]], [first["id"], first["id"]]):
+        response = client.put(
+            "/api/v1/admin/signing-proxies/order",
+            headers=mutation_headers("admin"),
+            json={"ids": ids},
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "incomplete_certificate_order"
+
+    listing = client.get("/api/v1/admin/signing-proxies", headers=auth_headers("admin")).json()
+    assert [item["name"] for item in listing["items"]] == ["Anna", "Bruno"]
+
+
+def test_ordinary_user_cannot_reorder_proxies(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    user = client.get("/api/v1/me", headers=auth_headers("user")).json()
+    client.patch(
+        f"/api/v1/admin/users/{user['id']}/role",
+        headers=mutation_headers("admin"),
+        json={"role": "user"},
+    )
+    proxy = _web_proxy(client, mutation_headers, "Anna", 9221)
+    response = client.put(
+        "/api/v1/admin/signing-proxies/order",
+        headers=mutation_headers("user"),
+        json={"ids": [proxy["id"]]},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "admin_required"
+
+
+def test_signing_without_a_chosen_certificate_takes_the_first_one(
+    client, auth_headers, mutation_headers
+):  # type: ignore[no-untyped-def]
+    """The top of the configured list is the default everywhere."""
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    first = _web_proxy(client, mutation_headers, "Anna", 9231)
+    second = _web_proxy(client, mutation_headers, "Bruno", 9232)
+    client.put(
+        "/api/v1/admin/signing-proxies/order",
+        headers=mutation_headers("admin"),
+        json={"ids": [second["id"], first["id"]]},
+    )
+
+    document = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("testo.txt", b"contenuto", "text/plain")},
+    ).json()
+    queued = client.post(
+        f"/api/v1/documents/{document['id']}/signatures",
+        headers=mutation_headers("admin"),
+        json={"mode": "cades"},
+    )
+    assert queued.status_code == 202, queued.text
+
+    session_generator = client.app.dependency_overrides[get_session]()
+    session = next(session_generator)
+    try:
+        job = session.scalar(
+            select(SignatureJob).where(SignatureJob.id == UUID(queued.json()["id"]))
+        )
+        assert job is not None
+        assert job.signing_proxy_name == "Bruno"
+    finally:
+        session_generator.close()
+
+
+def test_the_identity_reports_the_key_length(client, auth_headers, mutation_headers, monkeypatch):  # type: ignore[no-untyped-def]
+    """A 1024 bit card may sign, but the interface has to be able to say so."""
+    short = _identity(key_size=1024)
+
+    class FakeLocalClient:
+        def __init__(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def get_identity(self) -> SigningIdentity:
+            return short
+
+    monkeypatch.setattr(
+        "signur.api.proxies.discover_certificates",
+        lambda _path: [DiscoveredCertificate("Token", "CNS", short)],
+    )
+    monkeypatch.setattr("signur.api.proxies.LocalPkcs11SigningClient", FakeLocalClient)
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+
+    discovery = client.post(
+        "/api/v1/admin/signing-proxies/local/discover",
+        headers=mutation_headers("admin"),
+        json={"library_path": "/middleware/pkcs11.so"},
+    )
+
+    assert discovery.status_code == 200
+    assert discovery.json()["items"][0]["identity"]["key_bits"] == 1024
+
+
+def test_the_identity_says_what_the_certificate_is_for(
+    client, auth_headers, mutation_headers, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """A card often carries both: one certificate signs, the other authenticates."""
+    firma = _identity(key_usage=signing_key_usage())
+    autenticazione = _identity(key_usage=authentication_key_usage())
+
+    monkeypatch.setattr(
+        "signur.api.proxies.discover_certificates",
+        lambda _path: [
+            DiscoveredCertificate("Token", "Firma", firma),
+            DiscoveredCertificate("Token", "CNS", autenticazione),
+        ],
+    )
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+
+    discovery = client.post(
+        "/api/v1/admin/signing-proxies/local/discover",
+        headers=mutation_headers("admin"),
+        json={"library_path": "/middleware/pkcs11.so"},
+    )
+
+    assert discovery.status_code == 200
+    usi = [item["identity"]["intended_use"] for item in discovery.json()["items"]]
+    assert usi == ["signature", "authentication"]

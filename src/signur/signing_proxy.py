@@ -52,6 +52,29 @@ class SigningIdentity:
         return self.certificate.subject.rfc4514_string()
 
     @property
+    def intended_use(self) -> str | None:
+        """What the certificate declares it is for: "signature", "authentication", or nothing.
+
+        A card usually carries both kinds. Signing with the authentication one is
+        allowed, but worth telling the operator about.
+        """
+        try:
+            usage = self.certificate.extensions.get_extension_for_class(x509.KeyUsage).value
+        except x509.ExtensionNotFound:
+            return None
+        if usage.content_commitment:
+            return "signature"
+        if usage.digital_signature:
+            return "authentication"
+        return None
+
+    @property
+    def key_bits(self) -> int:
+        """How long the signing key is. Under 2048 the signature is weak but legal."""
+        public_key = self.certificate.public_key()
+        return int(getattr(public_key, "key_size", 0))
+
+    @property
     def subject(self) -> str:
         return self.certificate.subject.rfc4514_string()
 

@@ -39,6 +39,7 @@ let eventSocket = null;
 let reconnectTimer = null;
 let realtimeFingerprint = "";
 let discoveredLocalCertificates = [];
+let adminProxies = [];
 let localDiscoveryToken = 0;
 let localLibraryDebounceTimer = null;
 const activeDocumentJobs = new Map();
@@ -100,6 +101,8 @@ function renderDocuments(items) {
     if (item.signature_mode) metaParts.push(`Firma: ${signatureModeLabels[item.signature_mode] || item.signature_mode}`);
     meta.textContent = metaParts.join(" · ");
     description.append(name, meta);
+    const pdfaNote = pdfaWarning(item);
+    if (pdfaNote) description.append(pdfaNote);
 
     const activeJob = activeDocumentJobs.get(item.id);
     const status = document.createElement("span");
@@ -124,11 +127,11 @@ function renderDocuments(items) {
       const sign = document.createElement("button");
       sign.className = "button primary";
       sign.textContent = activeJob ? "Firma in corso" : (item.state === "signing_failed" ? "Riprova" : "Firma");
-      const hasCades = item.capabilities.includes("cades") && (
+      const hasDigital = ["cades", "pades", "xades"].some((mode) => item.capabilities.includes(mode)) && (
         availableSigningProxies().length > 0 || Boolean(signerIdentity)
       );
       const hasGraphic = item.capabilities.includes("graphic") && graphicSignatures.length > 0;
-      sign.disabled = Boolean(activeJob) || (!hasCades && !hasGraphic);
+      sign.disabled = Boolean(activeJob) || (!hasDigital && !hasGraphic);
       sign.addEventListener("click", () => openSignDialog(item));
       actions.append(sign);
       const remove = document.createElement("button");
@@ -282,6 +285,22 @@ function currentGraphicVersion(graphic) {
   return graphic?.versions.find((version) => version.version_number === graphic.current_version_number);
 }
 
+function pdfaWarning(item) {
+  // Never say anything about PDF/A for a file that is not a PDF.
+  if (!item || item.pdfa_status === "not_applicable" || item.pdfa_status === "conformant") return null;
+  const inside = item.input_format === "cms_attached";
+  const subject = inside ? "Il PDF contenuto nel P7M" : "Il PDF";
+  const note = document.createElement("p");
+  if (item.pdfa_status === "indeterminate") {
+    note.className = "pdfa-note failed";
+    note.textContent = `Verifica non riuscita. Non è stato possibile verificare la conformità PDF/A ${inside ? "del PDF contenuto nel P7M" : "del PDF"}. L'immutabilità della sua rappresentazione nel tempo non è garantita. Puoi comunque procedere con la firma.`;
+    return note;
+  }
+  note.className = "pdfa-note";
+  note.textContent = `${subject} non è conforme a PDF/A: non è garantita l'immutabilità della sua rappresentazione nel tempo. Puoi comunque procedere con la firma.`;
+  return note;
+}
+
 function availableSigningProxies() {
   return signingProxies.filter((proxy) => proxy.available && proxy.identity);
 }
@@ -297,13 +316,14 @@ function populateSignDialog(item) {
     option.disabled = !enabled;
     modeSelect.append(option);
   };
-  addMode("cades", "CAdES — file .p7m", availableSigningProxies().length > 0 || Boolean(signerIdentity));
+  const certificateReady = availableSigningProxies().length > 0 || Boolean(signerIdentity);
+  addMode("cades", "CAdES — file .p7m", certificateReady);
+  addMode("pades", "PAdES — PDF firmato", certificateReady);
+  addMode("xades", "XAdES — XML firmato", certificateReady);
   addMode("graphic", "Firma grafica — PDF", graphicSignatures.length > 0);
 
-  const unavailable = item.capabilities.filter((mode) => ["pades", "xades"].includes(mode));
-  const unavailableNote = document.querySelector("#unavailable-modes");
-  unavailableNote.hidden = unavailable.length === 0;
-  unavailableNote.textContent = unavailable.length ? `${unavailable.map((mode) => mode.toUpperCase()).join(" e ")} non sono ancora disponibili.` : "";
+  document.querySelector("#pades-graphic").checked = false;
+  document.querySelector("#xades-packaging").value = "enveloped";
 
   const proxySelect = document.querySelector("#signing-proxy");
   proxySelect.replaceChildren();
@@ -403,7 +423,9 @@ function renderSelectedSigner(identity) {
     ["Emittente", identity.issuer],
     ["Numero di serie", identity.serial_number],
     ["Validità", `${formatDate(identity.not_valid_before)} – ${formatDate(identity.not_valid_after)}`],
+    ["Chiave", identity.key_bits ? `${identity.key_bits} bit` : null],
   ]) {
+    if (value === null) continue;
     const row = document.createElement("div");
     const term = document.createElement("dt");
     const description = document.createElement("dd");
@@ -413,15 +435,38 @@ function renderSelectedSigner(identity) {
     details.append(row);
   }
   container.append(name, details);
+  // Signing is never blocked here: the operator is told, and decides.
+  if (identity.intended_use === "authentication") {
+    const note = document.createElement("p");
+    note.className = "pdfa-note";
+    note.textContent = "Il certificato selezionato è pensato per l'autenticazione e non per la firma di documenti. Un file firmato con questo certificato potrebbe comunque essere accettato in alcuni contesti.";
+    container.append(note);
+  }
+  if (identity.key_bits && identity.key_bits < 2048) {
+    const note = document.createElement("p");
+    note.className = "pdfa-note failed";
+    note.textContent = `La chiave di questo certificato è di ${identity.key_bits} bit, sotto i 2048 richiesti dagli standard attuali. La firma resta valida, ma alcuni programmi di verifica potrebbero segnalarla come debole o rifiutarla.`;
+    container.append(note);
+  }
 }
 
 function updateSignMode() {
   const mode = document.querySelector("#signature-mode").value;
   const graphic = mode === "graphic";
+  const pades = mode === "pades";
   const cmsInput = signingDocument?.input_format === "cms_attached";
+  const catalogueReady = graphicSignatures.length > 0;
+  const padesGraphicBox = document.querySelector("#pades-graphic");
+  if (!catalogueReady || !pades) padesGraphicBox.checked = false;
+  padesGraphicBox.disabled = !catalogueReady;
+  document.querySelector("#pades-graphic-field").hidden = !pades;
+  const padesNote = document.querySelector("#pades-graphic-note");
+  padesNote.hidden = !pades || catalogueReady;
+  padesNote.textContent = "Nessuna firma grafica nel catalogo: la firma PAdES resta disponibile, ma senza immagine visibile.";
   document.querySelector("#cades-strategy-field").hidden = mode !== "cades" || !cmsInput;
+  document.querySelector("#xades-packaging-field").hidden = mode !== "xades";
   document.querySelector("#proxy-field").hidden = graphic;
-  document.querySelector("#graphic-fields").hidden = !graphic;
+  document.querySelector("#graphic-fields").hidden = !(graphic || (pades && padesGraphicBox.checked));
   const selectedCertificate = selectedCertificateConfig();
   const needsPin = !graphic && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin;
   document.querySelector("#signing-pin-field").hidden = !needsPin;
@@ -433,8 +478,30 @@ function updateSignMode() {
 function updateSignSummary() {
   const mode = document.querySelector("#signature-mode").value;
   const summary = document.querySelector("#sign-summary");
+  const pdfaHolder = document.querySelector("#sign-pdfa");
+  pdfaHolder.replaceChildren();
+  const pdfaNote = pdfaWarning(signingDocument);
+  if (pdfaNote) pdfaHolder.append(pdfaNote);
   if (mode === "graphic") {
     summary.textContent = placements.length ? `${placements.length} posizione/i configurata/e. Questa modalità applica soltanto l'immagine, senza firma digitale.` : "Aggiungi almeno una posizione per continuare.";
+  } else if (mode === "xades") {
+    const identity = selectedProxyIdentity();
+    const packaging = document.querySelector("#xades-packaging").value;
+    const shape = packaging === "enveloping"
+      ? " in un nuovo XML contenitore, che conserva il file originale intatto"
+      : " inserendo la firma nell'XML";
+    summary.textContent = identity ? `Conferma: il file verrà firmato in formato XAdES${shape} da ${identity.display_name}.` : "Seleziona un certificato disponibile.";
+  } else if (mode === "pades") {
+    const identity = selectedProxyIdentity();
+    const wantsGraphic = document.querySelector("#pades-graphic").checked;
+    if (!identity) {
+      summary.textContent = "Seleziona un certificato disponibile.";
+    } else if (wantsGraphic && placements.length !== 1) {
+      summary.textContent = "Posiziona una sola immagine: diventerà l'aspetto della firma, quello che si apre cliccandola nel lettore PDF.";
+    } else {
+      const appearance = wantsGraphic ? " con l'immagine scelta come aspetto della firma" : " senza immagine visibile";
+      summary.textContent = `Conferma: il PDF verrà firmato in formato PAdES${appearance} da ${identity.display_name}.`;
+    }
   } else {
     const identity = selectedProxyIdentity();
     const strategy = document.querySelector("#cades-strategy").value;
@@ -455,6 +522,9 @@ function findGraphicVersion(versionId) {
 
 async function addPlacement() {
   try {
+    if (document.querySelector("#signature-mode").value === "pades" && placements.length >= 1) {
+      throw new Error("La firma PAdES ammette una sola immagine. Rimuovi quella presente per spostarla.");
+    }
     const versionId = document.querySelector("#graphic-signature").value;
     const selected = findGraphicVersion(versionId);
     const preview = await pdfPreviewPromise;
@@ -600,20 +670,29 @@ async function submitSignature(event) {
   event.preventDefault();
   if (!signingDocument) return;
   const mode = document.querySelector("#signature-mode").value;
+  const padesGraphic = mode === "pades" && document.querySelector("#pades-graphic").checked;
   if (mode === "graphic" && placements.length === 0) {
     showNotice("Aggiungi e posiziona almeno una firma sul documento.", "error");
     return;
   }
+  if (padesGraphic && placements.length !== 1) {
+    showNotice("La firma PAdES ammette una sola immagine: è l'aspetto della firma.", "error");
+    return;
+  }
   const apiPlacements = placements.map(({ _clientId, ...placement }) => placement);
-  const payload = { mode, placements: mode === "graphic" ? apiPlacements : [] };
+  const payload = { mode, placements: mode === "graphic" || padesGraphic ? apiPlacements : [] };
   if (mode === "cades" && signingDocument.input_format === "cms_attached") {
     payload.cades_strategy = document.querySelector("#cades-strategy").value;
   }
+  if (mode === "xades") {
+    payload.xades_packaging = document.querySelector("#xades-packaging").value;
+  }
+  const digital = mode === "cades" || mode === "pades" || mode === "xades";
   const proxyId = selectedProxyId();
-  if (mode === "cades" && proxyId) payload.signing_proxy_id = proxyId;
+  if (digital && proxyId) payload.signing_proxy_id = proxyId;
   const pinInput = document.querySelector("#signing-pin");
   const selectedCertificate = selectedCertificateConfig();
-  if (mode === "cades" && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin) {
+  if (digital && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin) {
     if (!pinInput.value) {
       showNotice("Inserisci il PIN della smart card.", "error");
       return;
@@ -870,9 +949,134 @@ async function loadAdminGraphics() {
   renderAdminGraphics(listing.items);
 }
 
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// Take the cards back to where they were, then let them slide into the new
+// order, so a click on an arrow reads as a movement rather than a redraw.
+function animateProxyReorder(previousTops) {
+  if (reducedMotion.matches) return;
+  for (const card of document.querySelectorAll("#proxies-admin .admin-card")) {
+    const previousTop = previousTops.get(card.dataset.proxyId);
+    if (previousTop === undefined) continue;
+    const shift = previousTop - card.getBoundingClientRect().top;
+    if (!shift) continue;
+    card.animate(
+      [{ transform: `translateY(${shift}px)` }, { transform: "none" }],
+      { duration: 180, easing: "ease-out" },
+    );
+  }
+}
+
+function proxyCardTops() {
+  const tops = new Map();
+  for (const card of document.querySelectorAll("#proxies-admin .admin-card")) {
+    tops.set(card.dataset.proxyId, card.getBoundingClientRect().top);
+  }
+  return tops;
+}
+
+// Two arrow clicks in a row must not race: the saves run one after the other,
+// and a save still queued simply picks up the latest order when its turn comes.
+let proxyOrderSave = Promise.resolve();
+let proxyOrderSaveQueued = false;
+
+function persistProxyOrder() {
+  if (proxyOrderSaveQueued) return proxyOrderSave;
+  proxyOrderSaveQueued = true;
+  proxyOrderSave = proxyOrderSave.then(async () => {
+    proxyOrderSaveQueued = false;
+    try {
+      await api("/api/v1/admin/signing-proxies/order", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: adminProxies.map((proxy) => proxy.id) }),
+      });
+      await loadSigningResources();
+    } catch (error) {
+      showNotice(error.message, "error");
+      await loadAdminProxies();
+    }
+  });
+  return proxyOrderSave;
+}
+
+function moveProxy(from, to) {
+  if (to < 0 || to >= adminProxies.length || from === to) return;
+  const previousTops = proxyCardTops();
+  const [moved] = adminProxies.splice(from, 1);
+  adminProxies.splice(to, 0, moved);
+  renderAdminProxies(adminProxies);
+  animateProxyReorder(previousTops);
+  persistProxyOrder();
+}
+
+function proxyCardBelow(container, pointerY) {
+  return [...container.querySelectorAll(".admin-card:not(.dragging)")].find(
+    (card) => pointerY < card.getBoundingClientRect().top + card.offsetHeight / 2,
+  );
+}
+
+function bindProxyDragAndDrop(container) {
+  container.addEventListener("dragover", (event) => {
+    const dragged = container.querySelector(".admin-card.dragging");
+    if (!dragged) return;
+    event.preventDefault();
+    const below = proxyCardBelow(container, event.clientY);
+    if (below) container.insertBefore(dragged, below);
+    else container.append(dragged);
+  });
+  container.addEventListener("drop", (event) => event.preventDefault());
+}
+
+function adoptRenderedProxyOrder(container) {
+  const byId = new Map(adminProxies.map((proxy) => [proxy.id, proxy]));
+  const rearranged = [...container.querySelectorAll(".admin-card")].map(
+    (card) => byId.get(card.dataset.proxyId),
+  );
+  if (rearranged.some((proxy, index) => proxy !== adminProxies[index])) {
+    adminProxies = rearranged;
+    renderAdminProxies(adminProxies);
+    persistProxyOrder();
+  }
+}
+
+function proxyOrderControls(proxy, index, total) {
+  const controls = document.createElement("div");
+  controls.className = "order-controls";
+  const handle = document.createElement("span");
+  handle.className = "drag-handle";
+  handle.title = "Trascina per riordinare";
+  handle.textContent = "⠿";
+  // The card is only draggable while the handle is held, so the fields inside
+  // it stay selectable.
+  handle.addEventListener("pointerdown", () => { handle.closest(".admin-card").draggable = true; });
+  handle.addEventListener("pointerup", () => { handle.closest(".admin-card").draggable = false; });
+  controls.append(handle);
+  for (const [label, symbol, target] of [
+    ["in su", "↑", index - 1],
+    ["in giù", "↓", index + 1],
+  ]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "icon-button";
+    button.textContent = symbol;
+    button.setAttribute("aria-label", `Sposta ${proxy.name} ${label}`);
+    button.disabled = target < 0 || target >= total;
+    button.addEventListener("click", () => moveProxy(index, target));
+    controls.append(button);
+  }
+  return controls;
+}
+
 function renderAdminProxies(items) {
+  adminProxies = items;
   const container = document.querySelector("#proxies-admin");
+  if (!container.dataset.dropBound) {
+    bindProxyDragAndDrop(container);
+    container.dataset.dropBound = "true";
+  }
   container.replaceChildren();
+  document.querySelector("#certificate-order-help").hidden = !items.length;
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -880,9 +1084,19 @@ function renderAdminProxies(items) {
     container.append(empty);
     return;
   }
-  for (const proxy of items) {
+  for (const [index, proxy] of items.entries()) {
     const card = document.createElement("article");
     card.className = "admin-card";
+    card.dataset.proxyId = proxy.id;
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "move";
+      card.classList.add("dragging");
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+      card.draggable = false;
+      adoptRenderedProxyOrder(container);
+    });
     const header = document.createElement("div");
     header.className = "admin-card-header";
     const title = document.createElement("div");
@@ -894,7 +1108,7 @@ function renderAdminProxies(items) {
     const pinLabel = proxy.backend === "local" ? ` · PIN ${proxy.pin_saved ? "salvato" : "richiesto a ogni firma"}` : "";
     meta.textContent = `${backendLabel} · Configurazione v${proxy.version} · ${proxy.active ? "Attivo" : "Disattivato"}${pinLabel}`;
     title.append(heading, meta);
-    header.append(title);
+    header.append(title, proxyOrderControls(proxy, index, items.length));
 
     const editor = document.createElement("div");
     editor.className = "admin-editor proxy-editor";
@@ -1486,7 +1700,9 @@ document.querySelector("#new-pkcs11-library").addEventListener("input", () => {
 document.querySelector("#discover-pkcs11").addEventListener("click", () => discoverLocalCertificates({ checkExists: true }));
 document.querySelector("#signature-mode").addEventListener("change", updateSignMode);
 document.querySelector("#cades-strategy").addEventListener("change", updateSignSummary);
+document.querySelector("#xades-packaging").addEventListener("change", updateSignSummary);
 document.querySelector("#signing-proxy").addEventListener("change", updateSignMode);
+document.querySelector("#pades-graphic").addEventListener("change", updateSignMode);
 document.querySelector("#add-placement").addEventListener("click", addPlacement);
 document.querySelector("#remove-placement").addEventListener("click", removeSelectedPlacement);
 document.querySelector("#pdf-stage").addEventListener("pdf-page-rendered", renderPlacementLayer);

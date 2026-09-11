@@ -15,6 +15,7 @@ from signur.config import get_settings
 from signur.errors import ApiError, ErrorBody, ErrorResponse, api_error_handler
 from signur.migrate import upgrade_to_head
 from signur.schemas import HealthView
+from signur.worker import running_worker
 
 logger = logging.getLogger(__name__)
 STATIC_ROOT = __file__.replace("main.py", "static")
@@ -39,7 +40,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         with SessionLocal() as session:
             ensure_bootstrap_admin(session, settings)
-    yield
+    # The worker runs inside the server, so a plain `signur` is a working install.
+    async with running_worker(settings.worker_poll_seconds):
+        yield
 
 
 def create_app() -> FastAPI:
@@ -79,12 +82,20 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        details = []
+        for error in exc.errors():
+            detail = dict(error)
+            context = detail.get("ctx")
+            if isinstance(context, dict):
+                # A model rule reports its own exception here, which is not serialisable.
+                detail["ctx"] = {key: str(value) for key, value in context.items()}
+            details.append(detail)
         body = ErrorResponse(
             error=ErrorBody(
                 code="validation_error",
                 message="La richiesta non è valida.",
                 request_id=request.state.request_id,
-                details=exc.errors(),
+                details=details,
             )
         )
         return JSONResponse(status_code=422, content=jsonable_encoder(body))
@@ -130,4 +141,5 @@ def run() -> None:
     host = settings.bind_host
     port = settings.bind_port
     print(f"Signur: http://{host}:{port}")
+    print(f"Configurazione e dati: {settings.data_dir}")
     uvicorn.run("signur.main:app", host=host, port=port, proxy_headers=False)

@@ -88,6 +88,11 @@ il middleware fra quelli effettivamente presenti sulla macchina, oppure indica
 un percorso assoluto con **Altro…**. Signur legge i certificati sulla carta e ti
 fa scegliere quello da usare.
 
+Una carta porta spesso **più di un certificato**: uno destinato alla firma dei
+documenti e uno all'autenticazione. Signur mostra a cosa serve quello scelto e,
+se è di autenticazione oppure ha una chiave più corta di 2048 bit, lo dice prima
+della firma senza impedirla: la decisione resta di chi firma.
+
 Percorsi tipici dei middleware:
 
 | Sistema | Esempio di percorso |
@@ -118,9 +123,29 @@ l'interfaccia mostra un avviso ogni volta che si sta per salvare un PIN.
 
 ## Configurazione
 
-Ogni impostazione ha un valore predefinito funzionante: copia `.env.example` in
-`.env` solo se vuoi cambiare qualcosa. Tutte le variabili usano il prefisso
-`SIGNUR_`.
+Ogni impostazione ha un valore predefinito funzionante: si configura qualcosa
+solo se serve. Tutte le variabili usano il prefisso `SIGNUR_`.
+
+Le impostazioni si scrivono in **`signur.env`**, un normale file di testo dentro
+la cartella dei dati:
+
+| Sistema | Dove |
+|---|---|
+| Windows | `%APPDATA%\signur\signur.env` |
+| macOS e Linux | `~/.config/signur/signur.env` |
+
+All'avvio Signur stampa il percorso esatto di quella cartella, così non serve
+cercarlo. Se non esiste, creala insieme al file: una riga per impostazione, per
+esempio
+
+```
+SIGNUR_BIND_HOST=0.0.0.0
+SIGNUR_PIN_ENCRYPTION_KEY=un-segreto-lungo-e-casuale-per-questo-deployment
+```
+
+È accettato anche un `.env` nella cartella da cui avvii Signur: vedi
+`.env.example`. Fra le tre fonti vincono le variabili d'ambiente, poi il `.env`
+della cartella corrente, infine `signur.env`.
 
 `SIGNUR_DATA_DIR` sposta in un colpo solo database e documenti; dove non è
 impostata, fuori da Windows viene rispettata `XDG_CONFIG_HOME`. `SIGNUR_DATABASE_URL`
@@ -189,12 +214,8 @@ uv sync --extra dev
 uv run signur
 ```
 
-Il worker che esegue le firme gira nello stesso processo del server; avvialo a
-parte solo se vuoi separarlo:
-
-```shell
-uv run signur-worker
-```
+Il worker che esegue le firme gira nello stesso processo del server, in un
+thread separato: le firme non bloccano l'interfaccia.
 
 Verifiche:
 

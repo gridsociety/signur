@@ -353,3 +353,103 @@ def test_document_owner_must_be_enabled_and_only_admin_can_transfer(
     )
     assert ineligible.status_code == 422
     assert ineligible.json()["error"]["code"] == "owner_ineligible"
+
+
+def test_xades_is_queued_with_the_chosen_packaging(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+    document = _upload(
+        client,
+        mutation_headers("owner"),
+        "fattura.xml",
+        b'<?xml version="1.0"?><fattura><riga>uno</riga></fattura>',
+        "application/xml",
+    ).json()
+
+    queued = client.post(
+        f"/api/v1/documents/{document['id']}/signatures",
+        headers=mutation_headers("owner"),
+        json={"mode": "xades", "xades_packaging": "enveloping"},
+    )
+
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["mode"] == "xades"
+    assert queued.json()["xades_packaging"] == "enveloping"
+
+
+def test_xades_defaults_to_enveloped(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+    document = _upload(
+        client,
+        mutation_headers("owner"),
+        "fattura.xml",
+        b'<?xml version="1.0"?><fattura><riga>uno</riga></fattura>',
+        "application/xml",
+    ).json()
+
+    queued = client.post(
+        f"/api/v1/documents/{document['id']}/signatures",
+        headers=mutation_headers("owner"),
+        json={"mode": "xades"},
+    )
+
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["xades_packaging"] == "enveloped"
+
+
+def test_the_xml_packaging_is_refused_outside_xades(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+    document = _upload(
+        client,
+        mutation_headers("owner"),
+        "fattura.xml",
+        b'<?xml version="1.0"?><fattura><riga>uno</riga></fattura>',
+        "application/xml",
+    ).json()
+
+    refused = client.post(
+        f"/api/v1/documents/{document['id']}/signatures",
+        headers=mutation_headers("owner"),
+        json={"mode": "cades", "xades_packaging": "enveloping"},
+    )
+
+    assert refused.status_code == 422, refused.text
+
+
+def test_a_plain_pdf_is_reported_as_not_pdfa(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+
+    document = _upload(
+        client, mutation_headers("owner"), "contratto.pdf", _pdf(), "application/pdf"
+    ).json()
+
+    assert document["pdfa_status"] == "non_conformant"
+    assert "missing_pdfa_identification" in document["pdfa_violations"]
+
+
+def test_a_non_pdf_says_nothing_about_pdfa(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+
+    document = _upload(
+        client,
+        mutation_headers("owner"),
+        "fattura.xml",
+        b'<?xml version="1.0"?><fattura/>',
+        "application/xml",
+    ).json()
+
+    assert document["pdfa_status"] == "not_applicable"
+    assert document["pdfa_violations"] == []
+
+
+def test_the_pdf_inside_a_p7m_is_checked_too(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+
+    document = _upload(
+        client,
+        mutation_headers("owner"),
+        "contratto.pdf.p7m",
+        _p7m(_pdf()),
+        "application/pkcs7-mime",
+    ).json()
+
+    assert document["pdfa_status"] == "non_conformant"

@@ -24,7 +24,9 @@ def sqlite_url(path: PurePath) -> str:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # A plain file next to the data, not a dotfile in whatever directory the
+        # service happened to start from. A local .env still wins, for development.
+        env_file=(default_data_dir() / "signur.env", ".env"),
         env_prefix="SIGNUR_",
         case_sensitive=False,
         extra="ignore",

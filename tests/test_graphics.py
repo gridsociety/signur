@@ -105,12 +105,10 @@ def test_admin_catalog_includes_inactive_graphics(client, auth_headers, mutation
     )
     assert changed.status_code == 200
 
-    assert client.get("/api/v1/graphic-signatures", headers=auth_headers("admin")).json()[
-        "total"
-    ] == 0
-    admin_catalog = client.get(
-        "/api/v1/admin/graphic-signatures", headers=auth_headers("admin")
+    assert (
+        client.get("/api/v1/graphic-signatures", headers=auth_headers("admin")).json()["total"] == 0
     )
+    admin_catalog = client.get("/api/v1/admin/graphic-signatures", headers=auth_headers("admin"))
     assert admin_catalog.status_code == 200
     assert admin_catalog.json()["items"][0]["name"] == "Firma archiviata"
     assert admin_catalog.json()["items"][0]["active"] is False
@@ -172,3 +170,86 @@ def test_graphic_request_freezes_coordinates_and_artifact_version(
         "height": 0.12,
         "layer_order": 0,
     }
+
+
+def _placement(version_id: str, order: int) -> dict:  # type: ignore[type-arg]
+    return {
+        "graphic_signature_version_id": version_id,
+        "page": 1,
+        "x": 0.1,
+        "y": 0.7,
+        "width": 0.25,
+        "height": 0.12,
+        "order": order,
+    }
+
+
+def test_pades_is_available_without_a_graphic(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    uploaded = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("documento.pdf", _pdf(), "application/pdf")},
+    )
+    assert "pades" in uploaded.json()["capabilities"]
+
+    response = client.post(
+        f"/api/v1/documents/{uploaded.json()['id']}/signatures",
+        headers=mutation_headers("admin"),
+        json={"mode": "pades"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["mode"] == "pades"
+
+
+def test_pades_takes_one_placement_but_refuses_two(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    graphic = _create(client, mutation_headers("admin"), name="Firma PAdES").json()
+    version_id = graphic["versions"][0]["id"]
+    uploaded = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("documento.pdf", _pdf(), "application/pdf")},
+    )
+    document_id = uploaded.json()["id"]
+
+    accepted = client.post(
+        f"/api/v1/documents/{document_id}/signatures",
+        headers=mutation_headers("admin"),
+        json={"mode": "pades", "placements": [_placement(version_id, 0)]},
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    refused = client.post(
+        f"/api/v1/documents/{document_id}/signatures",
+        headers=mutation_headers("admin"),
+        json={
+            "mode": "pades",
+            "placements": [_placement(version_id, 0), _placement(version_id, 1)],
+        },
+    )
+    assert refused.status_code == 422, refused.text
+
+
+def test_a_refused_plan_answers_with_a_readable_422(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    graphic = _create(client, mutation_headers("admin"), name="Firma CAdES").json()
+    uploaded = client.post(
+        "/api/v1/documents",
+        headers=mutation_headers("admin"),
+        files={"file": ("documento.pdf", _pdf(), "application/pdf")},
+    )
+
+    response = client.post(
+        f"/api/v1/documents/{uploaded.json()['id']}/signatures",
+        headers=mutation_headers("admin"),
+        json={
+            "mode": "cades",
+            "placements": [_placement(graphic["versions"][0]["id"], 0)],
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "validation_error"
+    assert "posizionamenti" in str(response.json()["error"]["details"])

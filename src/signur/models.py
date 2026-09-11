@@ -43,6 +43,11 @@ class SignatureMode(StrEnum):
     XADES = "xades"
 
 
+class XadesPackaging(StrEnum):
+    ENVELOPED = "enveloped"
+    ENVELOPING = "enveloping"
+
+
 class CadesStrategy(StrEnum):
     NEW = "new"
     NESTED = "nested"
@@ -72,6 +77,14 @@ class AnalysisStatus(StrEnum):
     PENDING = "pending"
     COMPLETE = "complete"
     INDETERMINATE = "indeterminate"
+
+
+class PdfaStatus(StrEnum):
+    PENDING = "pending"
+    CONFORMANT = "conformant"
+    NON_CONFORMANT = "non_conformant"
+    INDETERMINATE = "indeterminate"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class BlobState(StrEnum):
@@ -105,9 +118,7 @@ class UserSession(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     user: Mapped[User] = relationship(foreign_keys=[user_id])
     token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -167,6 +178,7 @@ class SigningProxy(Base):
     pkcs11_certificate_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     saved_pin_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
@@ -227,6 +239,11 @@ class Document(Base):
     analysis_status: Mapped[AnalysisStatus] = mapped_column(Enum(AnalysisStatus, native_enum=False))
     capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
     analysis_warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    pdfa_status: Mapped[PdfaStatus] = mapped_column(
+        Enum(PdfaStatus, native_enum=False), default=PdfaStatus.NOT_APPLICABLE
+    )
+    pdfa_declared_part: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    pdfa_violations: Mapped[list[str]] = mapped_column(JSON, default=list)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -266,6 +283,9 @@ class SignatureJob(Base):
     cades_strategy: Mapped[CadesStrategy | None] = mapped_column(
         Enum(CadesStrategy, native_enum=False), nullable=True
     )
+    xades_packaging: Mapped[XadesPackaging | None] = mapped_column(
+        Enum(XadesPackaging, native_enum=False), nullable=True
+    )
     status: Mapped[SignatureJobStatus] = mapped_column(
         Enum(SignatureJobStatus, native_enum=False), index=True
     )
@@ -276,6 +296,7 @@ class SignatureJob(Base):
     signing_display_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     signing_subject: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     signing_issuer: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    signing_key_bits: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signing_serial_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
     signing_not_valid_before: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

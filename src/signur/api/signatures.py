@@ -19,6 +19,7 @@ from signur.models import (
     SignatureMode,
     SigningProxy,
     UserRole,
+    XadesPackaging,
 )
 from signur.schemas import SignatureCreate, SignatureJobView, SigningIdentityView
 from signur.secret_box import SecretBoxError, seal_pin
@@ -92,8 +93,6 @@ def create_signature(
             "signature_mode_unavailable",
             "La modalità richiesta non è disponibile per questo documento.",
         )
-    if body.mode in {SignatureMode.PADES, SignatureMode.XADES}:
-        raise ApiError(501, "signature_mode_not_implemented", "Modalità non ancora implementata.")
     is_cms = document.input_format is InputFormat.CMS_ATTACHED
     if (is_cms and body.cades_strategy is CadesStrategy.NEW) or (
         not is_cms and body.cades_strategy in {CadesStrategy.NESTED, CadesStrategy.PARALLEL}
@@ -103,6 +102,9 @@ def create_signature(
             "cades_strategy_unavailable",
             "La strategia CAdES richiesta non è disponibile per questo documento.",
         )
+    xades_packaging = None
+    if body.mode is SignatureMode.XADES:
+        xades_packaging = body.xades_packaging or XadesPackaging.ENVELOPED
     cades_strategy = None
     if body.mode is SignatureMode.CADES:
         cades_strategy = body.cades_strategy or (
@@ -142,7 +144,9 @@ def create_signature(
         proxy_query = select(SigningProxy).where(SigningProxy.active.is_(True))
         if body.signing_proxy_id is not None:
             proxy_query = proxy_query.where(SigningProxy.id == body.signing_proxy_id)
-        signing_proxy = session.scalar(proxy_query.order_by(SigningProxy.name, SigningProxy.id))
+        signing_proxy = session.scalar(
+            proxy_query.order_by(SigningProxy.sort_order, SigningProxy.name, SigningProxy.id)
+        )
         if body.signing_proxy_id is not None and signing_proxy is None:
             raise ApiError(422, "signing_proxy_unavailable", "Proxy di firma non disponibile.")
         if signing_proxy is not None and signing_proxy.backend is CertificateBackend.LOCAL:
@@ -163,6 +167,7 @@ def create_signature(
         operator=user,
         mode=body.mode,
         cades_strategy=cades_strategy,
+        xades_packaging=xades_packaging,
         request_id=request.state.request_id,
         placements=placements,
         signing_proxy=signing_proxy,

@@ -20,15 +20,29 @@ from signur.models import (
     Document,
     DocumentState,
     InputFormat,
+    PdfaStatus,
     SignatureJob,
     SignatureJobStatus,
     SignedArtifact,
     UserRole,
 )
+from signur.pdfa import PdfaReport, check_pdfa
 from signur.schemas import DocumentDetail, DocumentList, DocumentView
 from signur.storage import LocalBlobStorage
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def _check_pdfa(input_format: InputFormat, path: Path) -> PdfaReport:
+    """Check the uploaded PDF, or the PDF reached through the CMS layers."""
+    if input_format is InputFormat.PDF:
+        return check_pdfa(path.read_bytes())
+    if input_format is InputFormat.CMS_ATTACHED:
+        try:
+            return check_pdfa(extract_nested_content(path.read_bytes()).content)
+        except CmsContentError:
+            return PdfaReport(PdfaStatus.INDETERMINATE, ["unreadable_cms"])
+    return PdfaReport(PdfaStatus.NOT_APPLICABLE)
 
 
 def _visible_document_query(user_id: uuid.UUID, is_admin: bool) -> Select[tuple[Document]]:
@@ -98,6 +112,7 @@ async def upload_document(
     storage = LocalBlobStorage(settings.storage_root, settings.max_upload_bytes)
     stored = await storage.store_upload(file)
     detection = detect_content(stored.prefix, file.content_type, stored.path)
+    pdfa = _check_pdfa(detection.input_format, stored.path)
     blob = Blob(
         storage_key=stored.key,
         kind="original",
@@ -118,6 +133,9 @@ async def upload_document(
         analysis_status=detection.analysis_status,
         capabilities=detection.capabilities,
         analysis_warnings=detection.warnings,
+        pdfa_status=pdfa.status,
+        pdfa_declared_part=pdfa.declared_part,
+        pdfa_violations=pdfa.violations,
     )
     session.add(document)
     session.flush()

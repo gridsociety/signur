@@ -88,6 +88,16 @@ def _matrix(geometry: tuple[float, ...], placement: GraphicPlacement) -> tuple[f
     return 0, -width, height, 0, llx + visible_y, lly + page_height - visible_x
 
 
+def placement_rect(
+    writer: IncrementalPdfFileWriter, placement: GraphicPlacement
+) -> tuple[float, float, float, float]:
+    """Return the PDF rectangle a placement covers, in page coordinates."""
+    a, b, c, d, e, f = _matrix(_page_geometry(writer, placement.page - 1), placement)
+    xs = (e, e + a, e + c, e + a + c)
+    ys = (f, f + b, f + d, f + b + d)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def apply_graphics(original: bytes, placements: list[GraphicPlacement]) -> bytes:
     if not placements:
         raise GraphicPdfError("È richiesto almeno un posizionamento grafico.")
