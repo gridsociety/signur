@@ -31,6 +31,10 @@ let signingDocument = null;
 let ownerDocument = null;
 let placements = [];
 let selectedPlacementId = null;
+// Handles for the placements in this page only: they never reach the server, and
+// crypto.randomUUID is unavailable outside a secure context, such as a plain HTTP
+// address on the local network.
+let placementCounter = 0;
 let pdfPreviewPromise = null;
 let pdfPreviewToken = 0;
 let activeJobId = null;
@@ -555,7 +559,7 @@ async function addPlacement() {
     const imageRatio = selected.version.height_pixels / selected.version.width_pixels;
     const height = Math.min(0.3, Math.max(0.04, width * pageRatio * imageRatio));
     const placement = {
-      _clientId: crypto.randomUUID(),
+      _clientId: `posizionamento-${++placementCounter}`,
       graphic_signature_version_id: versionId,
       page: preview.currentPageNumber(),
       x: Math.max(0, 0.7 - width),
