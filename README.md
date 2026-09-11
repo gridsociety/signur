@@ -1,3 +1,5 @@
+<img src="assets/signur.png" alt="" width="96" align="right">
+
 # Signur
 
 Signur è un servizio self-hosted per firmare documenti. Carichi un file di

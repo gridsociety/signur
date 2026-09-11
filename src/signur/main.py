@@ -135,6 +135,11 @@ def create_app() -> FastAPI:
     def health() -> HealthView:
         return HealthView(status="ok")
 
+    @app.get("/favicon.ico", include_in_schema=False, response_class=FileResponse)
+    def favicon() -> FileResponse:
+        # Browsers ask for this path on their own, whatever the page declares.
+        return FileResponse(f"{STATIC_ROOT}/signur.png", media_type="image/png")
+
     @app.get("/", include_in_schema=False, response_class=FileResponse)
     def home() -> FileResponse:
         return FileResponse(f"{STATIC_ROOT}/index.html", media_type="text/html; charset=utf-8")

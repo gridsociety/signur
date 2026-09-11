@@ -21,7 +21,8 @@ button, input, select { font: inherit; }
   background: rgba(250, 251, 248, .92);
 }
 
-.brand { color: #183f2b; font: 750 1.35rem/1 Georgia, serif; text-decoration: none; }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: #183f2b; font: 750 1.35rem/1 Georgia, serif; text-decoration: none; }
+.brand-mark { width: 32px; height: 32px; border-radius: 50%; }
 .account { font-size: .9rem; color: #526057; }
 .main-nav { display: flex; align-self: stretch; gap: 8px; }
 .nav-button { padding: 0 10px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: #637067; cursor: pointer; font-weight: 700; }
