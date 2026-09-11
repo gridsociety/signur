@@ -53,8 +53,7 @@ junit.xml
 *.sqlite
 *.sqlite3
 
-# Development documentation and planning: internal material that must not
-# reach the public repository
+# Development documentation and planning
 docs/
 plans/
 specs/
