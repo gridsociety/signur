@@ -137,7 +137,8 @@ def create_app() -> FastAPI:
 
     @app.get("/favicon.ico", include_in_schema=False, response_class=FileResponse)
     def favicon() -> FileResponse:
-        # Browsers ask for this path on their own, whatever the page declares.
+        # Browsers ask for this path on their own, and a few of them still want a
+        # raster: the page itself declares the vector.
         return FileResponse(f"{STATIC_ROOT}/signur.png", media_type="image/png")
 
     @app.get("/", include_in_schema=False, response_class=FileResponse)

@@ -1,4 +1,4 @@
-<img src="assets/signur.png" alt="" width="96" align="right">
+<img src="assets/signur.svg" alt="" width="96" align="right">
 
 # Signur
 
