@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: signur
+      POSTGRES_USER: signur
+      POSTGRES_PASSWORD: signur-dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - signur-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signur -d signur"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  signur-postgres:

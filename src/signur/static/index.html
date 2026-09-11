@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Signur</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Signur, home">Signur</a>
+      <nav id="main-nav" class="main-nav" aria-label="Navigazione" hidden>
+        <button class="nav-button active" data-panel="documents-panel">Documenti</button>
+        <button id="users-nav" class="nav-button" data-panel="users-panel" hidden>Utenti</button>
+        <button id="graphics-nav" class="nav-button" data-panel="graphics-panel" hidden>Firme grafiche</button>
+            <button id="proxies-nav" class="nav-button" data-panel="proxies-panel" hidden>Certificati</button>
+      </nav>
+      <div id="account" class="account" hidden>
+        <span id="account-name"></span>
+        <button id="account-password" class="button small" type="button" hidden>Password</button>
+        <button id="account-logout" class="button small" type="button" hidden>Esci</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section id="loading" class="center-card" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Caricamento…</p>
+      </section>
+      <section id="login" class="center-card" hidden>
+        <span class="eyebrow">Accesso</span>
+        <h1>Entra in Signur</h1>
+        <p>Inserisci le credenziali del tuo account.</p>
+        <form id="login-form" class="admin-form login-form">
+          <label class="field" for="login-username">Nome utente<input id="login-username" name="username" autocomplete="username" required></label>
+          <label class="field" for="login-password">Password<input id="login-password" name="password" type="password" autocomplete="current-password"></label>
+          <p id="login-error" class="notice error" role="alert" hidden></p>
+          <button class="button primary" type="submit">Entra</button>
+        </form>
+      </section>
+
+      <section id="access-pending" class="center-card" hidden>
+        <span class="eyebrow">Accesso in attesa</span>
+        <h1>Ciao, <span id="pending-name"></span>.</h1>
+        <p id="pending-message">Chiedi a un amministratore di autorizzare il tuo account.</p>
+      </section>
+
+      <section id="app" hidden>
+        <div id="password-warning" class="notice warning" role="alert" hidden>
+          <strong>L'account amministratore non ha una password.</strong>
+          <span>Finché resta così, Signur è raggiungibile solo da questo computer. Imposta una password per poterlo usare dalla rete.</span>
+          <button id="set-password-now" class="button small" type="button">Imposta una password</button>
+        </div>
+        <dialog id="user-dialog">
+          <form id="user-form" class="admin-form" method="dialog">
+            <h2>Modifica utente</h2>
+            <label id="edit-username-field" class="field" for="edit-username">Nome utente<input id="edit-username" maxlength="255" autocomplete="off"></label>
+            <label class="field" for="edit-display-name">Nome completo<input id="edit-display-name" maxlength="255" required></label>
+            <label class="field" for="edit-email">Email<input id="edit-email" type="email" maxlength="320"></label>
+            <label id="edit-password-field" class="field" for="edit-password">Nuova password<input id="edit-password" type="password" minlength="8" autocomplete="new-password"></label>
+            <p class="field-help">Lascia vuota la password per non modificarla. Impostandola, le sessioni dell'utente vengono chiuse.</p>
+            <p id="user-error" class="notice error" role="alert" hidden></p>
+            <div class="dialog-actions">
+              <button id="user-cancel" class="button" type="button">Annulla</button>
+              <button class="button primary" type="submit">Salva</button>
+            </div>
+          </form>
+        </dialog>
+        <dialog id="password-dialog">
+          <form id="password-form" class="admin-form" method="dialog">
+            <h2>Cambia password</h2>
+            <label id="current-password-field" class="field" for="current-password">Password attuale<input id="current-password" type="password" autocomplete="current-password"></label>
+            <label class="field" for="new-password">Nuova password<input id="new-password" type="password" autocomplete="new-password" minlength="8" required></label>
+            <p class="field-help">Almeno 8 caratteri. Cambiando la password tutte le altre sessioni vengono chiuse.</p>
+            <p id="password-error" class="notice error" role="alert" hidden></p>
+            <div class="dialog-actions">
+              <button id="password-cancel" class="button" type="button">Annulla</button>
+              <button class="button primary" type="submit">Salva</button>
+            </div>
+          </form>
+        </dialog>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section id="documents-panel" class="panel">
+          <div class="hero">
+            <div>
+              <span class="eyebrow">Firma digitale</span>
+              <h1>I tuoi documenti</h1>
+              <p>Carica, controlla e firma un documento.</p>
+            </div>
+            <label class="button primary" for="file-input">Carica documento</label>
+            <input id="file-input" type="file" hidden>
+          </div>
+          <aside id="signer" class="signer-card" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <div>
+              <span class="muted">Certificato di firma</span>
+              <strong id="signer-name">Verifica in corso…</strong>
+              <details id="signer-details" hidden>
+                <summary>Dettagli certificato</summary>
+                <dl>
+                  <div><dt>Soggetto</dt><dd id="signer-subject"></dd></div>
+                  <div><dt>Emittente</dt><dd id="signer-issuer"></dd></div>
+                  <div><dt>Numero di serie</dt><dd id="signer-serial"></dd></div>
+                  <div><dt>Validità</dt><dd id="signer-validity"></dd></div>
+                </dl>
+              </details>
+            </div>
+          </aside>
+          <section id="documents" class="documents" aria-live="polite"></section>
+        </section>
+
+        <section id="users-panel" class="panel" hidden>
+          <div class="hero compact">
+            <div>
+              <span class="eyebrow">Amministrazione</span>
+              <h1>Utenti</h1>
+              <p>Autorizza gli account e assegna il ruolo appropriato.</p>
+            </div>
+            <button id="refresh-users" class="button">Aggiorna</button>
+          </div>
+          <form id="create-user-form" class="admin-form" hidden>
+            <label class="field" for="new-user-username">Nome utente<input id="new-user-username" name="username" required maxlength="255" autocomplete="off"></label>
+            <label class="field" for="new-user-name">Nome completo<input id="new-user-name" name="display_name" required maxlength="255"></label>
+            <label class="field" for="new-user-email">Email<input id="new-user-email" name="email" type="email" maxlength="320"></label>
+            <label class="field" for="new-user-role">Ruolo<select id="new-user-role" name="role">
+              <option value="user">Utente</option>
+              <option value="admin">Amministratore</option>
+              <option value="no_access">Nessun accesso</option>
+            </select></label>
+            <label class="field" for="new-user-password">Password<input id="new-user-password" name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+            <button class="button primary" type="submit">Crea utente</button>
+          </form>
+          <section id="users" class="users" aria-live="polite"></section>
+        </section>
+
+        <section id="graphics-panel" class="panel" hidden>
+          <div class="hero compact">
+            <div><span class="eyebrow">Amministrazione</span><h1>Firme grafiche</h1><p>Gestisci immagini PNG trasparenti e relative versioni.</p></div>
+          </div>
+          <form id="create-graphic-form" class="admin-form">
+            <label class="field" for="new-graphic-name">Nome<input id="new-graphic-name" name="name" required maxlength="255"></label>
+            <label class="field" for="new-graphic-description">Descrizione<input id="new-graphic-description" name="description" maxlength="1000"></label>
+            <label class="field" for="new-graphic-image">PNG trasparente<input id="new-graphic-image" name="image" type="file" accept="image/png" required></label>
+            <button class="button primary" type="submit">Crea firma grafica</button>
+          </form>
+          <section id="graphics-admin" class="admin-list" aria-live="polite"></section>
+        </section>
+
+        <section id="proxies-panel" class="panel" hidden>
+          <div class="hero compact">
+            <div><span class="eyebrow">Amministrazione</span><h1>Certificati</h1><p>Configura certificati tramite PKCS11 Web Proxy o middleware PKCS#11 locale.</p></div>
+          </div>
+          <form id="create-proxy-form" class="admin-form certificate-form">
+            <div class="certificate-general-fields">
+              <label class="field" for="new-proxy-name">Nome del certificato<input id="new-proxy-name" name="name" required maxlength="255" placeholder="Es. Carta ufficio"></label>
+              <label class="field" for="new-certificate-backend">Tipo di collegamento<select id="new-certificate-backend" name="backend">
+                <option value="pkcs11_web_proxy">PKCS11 Web Proxy</option>
+                <option value="local">Locale</option>
+              </select></label>
+            </div>
+            <div id="new-proxy-url-field" class="certificate-backend-fields">
+              <span class="form-section-title">Configurazione del proxy</span>
+              <label class="field" for="new-proxy-url">URL interno<input id="new-proxy-url" name="base_url" type="url" maxlength="1000" placeholder="https://10.0.0.10:8443"></label>
+            </div>
+            <div id="new-local-certificate-fields" class="certificate-backend-fields local-certificate-fields" hidden>
+              <span class="form-section-title">Configurazione locale</span>
+              <div class="certificate-middleware-fields">
+                <label class="field" for="new-pkcs11-library-choice">Middleware PKCS#11<select id="new-pkcs11-library-choice"></select></label>
+                <label id="new-pkcs11-library-custom-field" class="field" for="new-pkcs11-library" hidden>Percorso del middleware<input id="new-pkcs11-library" name="pkcs11_library_path" maxlength="2000" placeholder="/percorso/al/middleware"></label>
+              </div>
+              <div class="certificate-discovery-fields">
+                <label class="field" for="new-pkcs11-certificate">Certificato<select id="new-pkcs11-certificate" disabled></select></label>
+                <button id="discover-pkcs11" class="button" type="button">Ricarica certificati</button>
+              </div>
+              <div class="certificate-pin-fields">
+                <label class="check-field"><input id="new-save-pin" type="checkbox"> <span id="save-pin-label">Salva il PIN cifrato</span></label>
+                <label id="new-pin-field" class="field" for="new-pkcs11-pin" hidden>PIN<input id="new-pkcs11-pin" type="password" inputmode="numeric" autocomplete="new-password"></label>
+                <p class="field-help">Il PIN salvato può essere sostituito o rimosso, ma non visualizzato.</p>
+                <p id="pin-encryption-warning" class="notice warning" role="alert" hidden>
+                  <strong>Il PIN verrà salvato in chiaro.</strong>
+                  <span>Non è configurato <code>SIGNUR_PIN_ENCRYPTION_KEY</code>, quindi il PIN viene conservato nel database senza cifratura.</span>
+                  <a href="https://github.com/gridsociety/signur#configurazione" target="_blank" rel="noopener noreferrer">Come cifrarlo</a>
+                </p>
+              </div>
+            </div>
+            <div class="certificate-form-actions">
+              <button class="button primary" type="submit">Aggiungi certificato</button>
+            </div>
+          </form>
+          <section id="proxies-admin" class="admin-list" aria-live="polite"></section>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="sign-dialog" class="wide-dialog">
+      <form id="sign-form">
+        <span class="eyebrow">Firma documento</span>
+        <h2 id="sign-dialog-title">Configura la firma</h2>
+        <p class="document-focus"><strong id="dialog-document"></strong></p>
+        <div id="sign-config" class="sign-layout">
+          <div id="preview-column" class="preview-column" hidden>
+            <div class="preview-toolbar">
+              <button id="previous-page" class="icon-button" type="button" aria-label="Pagina precedente">←</button>
+              <span id="page-status">Pagina — di —</span>
+              <button id="next-page" class="icon-button" type="button" aria-label="Pagina successiva">→</button>
+              <span class="toolbar-spacer"></span>
+              <button id="zoom-out" class="icon-button" type="button" aria-label="Riduci anteprima">−</button>
+              <span id="zoom-status">100%</span>
+              <button id="zoom-in" class="icon-button" type="button" aria-label="Ingrandisci anteprima">+</button>
+            </div>
+            <p id="embedded-pdf-label" class="embedded-label" hidden>PDF contenuto nel P7M</p>
+            <div id="pdf-scroll" class="pdf-scroll">
+              <div id="pdf-stage" class="pdf-stage">
+                <canvas id="pdf-canvas" aria-label="Anteprima PDF"></canvas>
+                <div id="placement-layer" class="placement-layer"></div>
+              </div>
+            </div>
+            <p id="preview-error" class="preview-error" hidden>Anteprima non disponibile. <a id="preview-fallback" href="#" target="_blank">Apri il PDF</a>.</p>
+          </div>
+          <div class="sign-fields">
+            <label class="field" for="signature-mode">Modalità<select id="signature-mode" required></select></label>
+            <label id="cades-strategy-field" class="field" for="cades-strategy" hidden>Tipo di firma CAdES
+              <select id="cades-strategy">
+                <option value="nested">Matrioska — firma l'intero P7M</option>
+                <option value="parallel">Parallela — affianca le firme esistenti</option>
+              </select>
+            </label>
+            <p id="unavailable-modes" class="callout" hidden></p>
+            <div id="proxy-field">
+              <label id="proxy-selector-field" class="field" for="signing-proxy">Certificato di firma<select id="signing-proxy"></select></label>
+              <div id="selected-signer" class="identity-summary"></div>
+              <label id="signing-pin-field" class="field" for="signing-pin" hidden>PIN della smart card<input id="signing-pin" type="password" inputmode="numeric" autocomplete="off"></label>
+            </div>
+            <div id="graphic-fields" hidden>
+              <label class="field" for="graphic-signature">Firma grafica<select id="graphic-signature"></select></label>
+              <div class="placement-tools">
+                <button id="add-placement" class="button small" type="button">Aggiungi alla pagina</button>
+                <button id="remove-placement" class="button small danger" type="button" disabled>Rimuovi selezionata</button>
+              </div>
+              <p class="muted">Trascina la firma sul documento e usa la maniglia nell'angolo per ridimensionarla. Ingrandisci l'anteprima per una maggiore precisione.</p>
+              <ol id="placements" class="placements"></ol>
+            </div>
+            <div id="sign-summary" class="confirmation-summary"></div>
+          </div>
+        </div>
+        <section id="sign-progress" class="progress-card" aria-live="polite" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <div><strong id="progress-title">Tentativo in coda</strong><p id="progress-message">La pagina si aggiornerà automaticamente.</p></div>
+        </section>
+        <div class="dialog-actions">
+          <button id="cancel-sign" class="button" type="button">Chiudi</button>
+          <a id="download-result" class="button" href="#" hidden>Scarica risultato</a>
+          <button id="confirm-sign" class="button primary" type="submit">Conferma e firma</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="owner-dialog">
+      <form method="dialog">
+        <span class="eyebrow">Amministrazione</span>
+        <h2>Cambiare proprietario?</h2>
+        <p><strong id="owner-dialog-document"></strong></p>
+        <label class="field" for="owner-select">Nuovo proprietario<select id="owner-select"></select></label>
+        <p class="muted">Sono disponibili soltanto utenti abilitati e amministratori.</p>
+        <div class="dialog-actions">
+          <button class="button" value="cancel">Annulla</button>
+          <button id="confirm-owner" class="button primary" value="confirm">Assegna</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

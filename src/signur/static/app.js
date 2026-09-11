@@ -1,0 +1,1505 @@
+const stateLabels = {
+  to_sign: "Da firmare",
+  signing_failed: "Firma fallita",
+  signed: "Firmato",
+};
+const jobLabels = {
+  queued: ["Tentativo in coda", "La firma verrà avviata appena possibile."],
+  running: ["Firma in corso", "Il documento è in elaborazione."],
+  completed: ["Firma completata", "Il risultato è pronto per il download."],
+  failed: ["Firma fallita", "Puoi correggere la configurazione e riprovare."],
+};
+const roleLabels = {
+  no_access: "Nessun accesso",
+  user: "Utente",
+  admin: "Amministratore",
+};
+const signatureModeLabels = {
+  graphic: "Grafica",
+  cades: "CAdES",
+  pades: "PAdES",
+  xades: "XAdES",
+};
+
+let signerIdentity = null;
+let signingProxies = [];
+let graphicSignatures = [];
+let currentProfile = null;
+let allUsers = [];
+let eligibleOwners = [];
+let signingDocument = null;
+let ownerDocument = null;
+let placements = [];
+let selectedPlacementId = null;
+let pdfPreviewPromise = null;
+let pdfPreviewToken = 0;
+let activeJobId = null;
+let jobPollTimer = null;
+let eventSocket = null;
+let reconnectTimer = null;
+let realtimeFingerprint = "";
+let discoveredLocalCertificates = [];
+let localDiscoveryToken = 0;
+let localLibraryDebounceTimer = null;
+const activeDocumentJobs = new Map();
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const error = new Error(body.error?.message || "Operazione non riuscita.");
+    error.code = body.error?.code;
+    throw error;
+  }
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+function showNotice(message, kind = "success") {
+  const notice = document.querySelector("#notice");
+  notice.textContent = message;
+  notice.className = `notice ${kind}`;
+  notice.hidden = false;
+}
+
+function formatDate(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("it-IT", { dateStyle: "medium" }).format(new Date(value));
+}
+
+function formatDateTime(value) {
+  if (!value) return "Mai";
+  return new Intl.DateTimeFormat("it-IT", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function renderDocuments(items) {
+  const container = document.querySelector("#documents");
+  container.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Non ci sono ancora documenti.";
+    container.append(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("article");
+    row.className = "document";
+    const description = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "document-name";
+    name.textContent = item.original_name;
+    const meta = document.createElement("div");
+    meta.className = "document-meta";
+    const metaParts = [
+      formatDate(item.created_at),
+      `${Math.ceil(item.size_bytes / 1024)} KB`,
+      `Proprietario: ${item.owner.display_name}`,
+    ];
+    if (item.signature_mode) metaParts.push(`Firma: ${signatureModeLabels[item.signature_mode] || item.signature_mode}`);
+    meta.textContent = metaParts.join(" · ");
+    description.append(name, meta);
+
+    const activeJob = activeDocumentJobs.get(item.id);
+    const status = document.createElement("span");
+    status.className = `state ${item.state}`;
+    status.textContent = activeJob ? (activeJob.status === "queued" ? "In coda" : "Firma in corso") : (stateLabels[item.state] || item.state);
+
+    const actions = document.createElement("div");
+    actions.className = "document-actions";
+    const original = document.createElement("a");
+    original.className = "button";
+    original.textContent = "Originale";
+    original.href = `/api/v1/documents/${item.id}/original`;
+    actions.append(original);
+
+    if (item.state === "signed") {
+      const result = document.createElement("a");
+      result.className = "button primary";
+      result.textContent = "Scarica firmato";
+      result.href = `/api/v1/documents/${item.id}/result`;
+      actions.append(result);
+    } else {
+      const sign = document.createElement("button");
+      sign.className = "button primary";
+      sign.textContent = activeJob ? "Firma in corso" : (item.state === "signing_failed" ? "Riprova" : "Firma");
+      const hasCades = item.capabilities.includes("cades") && (
+        availableSigningProxies().length > 0 || Boolean(signerIdentity)
+      );
+      const hasGraphic = item.capabilities.includes("graphic") && graphicSignatures.length > 0;
+      sign.disabled = Boolean(activeJob) || (!hasCades && !hasGraphic);
+      sign.addEventListener("click", () => openSignDialog(item));
+      actions.append(sign);
+      const remove = document.createElement("button");
+      remove.className = "button danger";
+      remove.textContent = "Elimina";
+      remove.disabled = Boolean(activeJob);
+      remove.addEventListener("click", () => deleteDocument(item));
+      actions.append(remove);
+    }
+    const hasOtherEligibleUser = eligibleOwners.some(
+      (candidate) => candidate.id !== currentProfile?.id,
+    );
+    if (currentProfile?.role === "admin" && hasOtherEligibleUser) {
+      const transfer = document.createElement("button");
+      transfer.className = "button";
+      transfer.textContent = "Cambia proprietario";
+      transfer.disabled = Boolean(activeJob);
+      transfer.addEventListener("click", () => openOwnerDialog(item));
+      actions.append(transfer);
+    }
+    row.append(description, status, actions);
+    container.append(row);
+  }
+}
+
+async function loadDocuments() {
+  const listing = await api("/api/v1/documents?limit=100&offset=0");
+  renderDocuments(listing.items);
+}
+
+async function deleteDocument(item) {
+  if (!window.confirm(`Eliminare definitivamente “${item.original_name}”?`)) return;
+  try {
+    await api(`/api/v1/documents/${item.id}`, { method: "DELETE" });
+    showNotice("Documento eliminato.");
+    await loadDocuments();
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+function renderUsers() {
+  const container = document.querySelector("#users");
+  container.replaceChildren();
+  for (const user of allUsers) {
+    const row = document.createElement("article");
+    row.className = "user-row";
+    const identity = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = user.display_name;
+    const details = document.createElement("span");
+    details.className = "user-meta";
+    details.textContent = `${user.username} · ${user.email || "Nessuna email"} · Ultimo accesso ${formatDateTime(user.last_seen_at)}`;
+    identity.append(name, details);
+
+    const controls = document.createElement("div");
+    controls.className = "role-controls";
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `Ruolo di ${user.display_name}`);
+    for (const role of ["no_access", "user", "admin"]) {
+      const option = document.createElement("option");
+      option.value = role;
+      option.textContent = roleLabels[role];
+      option.selected = role === user.role;
+      select.append(option);
+    }
+    const save = document.createElement("button");
+    save.className = "button";
+    save.textContent = "Salva ruolo";
+    const isSelf = user.id === currentProfile.id;
+    select.disabled = isSelf;
+    save.disabled = isSelf;
+    if (isSelf) save.title = "Il proprio ruolo amministratore non può essere modificato qui.";
+    select.addEventListener("change", () => { save.disabled = select.value === user.role; });
+    save.addEventListener("click", () => saveUserRole(user, select, save));
+    controls.append(select, save);
+    if (authMode === "local") {
+      const edit = document.createElement("button");
+      edit.className = "button";
+      edit.textContent = "Modifica";
+      edit.addEventListener("click", () => openUserDialog(user));
+      controls.append(edit);
+    }
+    row.append(identity, controls);
+    container.append(row);
+  }
+}
+
+async function loadUsers() {
+  const users = [];
+  let offset = 0;
+  while (true) {
+    const listing = await api(`/api/v1/admin/users?limit=100&offset=${offset}`);
+    users.push(...listing.items);
+    offset += listing.items.length;
+    if (!listing.items.length || offset >= listing.total) break;
+  }
+  allUsers = users;
+  eligibleOwners = users.filter((user) => user.role !== "no_access");
+  renderUsers();
+}
+
+async function saveUserRole(user, select, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/v1/admin/users/${user.id}/role`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: select.value }),
+    });
+    showNotice(`Ruolo di ${user.display_name} aggiornato.`);
+    await loadUsers();
+  } catch (error) {
+    showNotice(error.message, "error");
+    select.value = user.role;
+    button.disabled = false;
+  }
+}
+
+function showSigner(identity) {
+  signerIdentity = identity;
+  const card = document.querySelector("#signer");
+  card.classList.remove("unavailable");
+  document.querySelector("#signer-name").textContent = identity.display_name;
+  document.querySelector("#signer-subject").textContent = identity.subject;
+  document.querySelector("#signer-issuer").textContent = identity.issuer;
+  document.querySelector("#signer-serial").textContent = identity.serial_number;
+  document.querySelector("#signer-validity").textContent = `${formatDate(identity.not_valid_before)} – ${formatDate(identity.not_valid_after)}`;
+  document.querySelector("#signer-details").hidden = false;
+}
+
+async function loadSigningResources() {
+  const [identityResult, proxiesResult, graphicsResult] = await Promise.allSettled([
+    api("/api/v1/signing-identity"),
+    api("/api/v1/signing-proxies"),
+    api("/api/v1/graphic-signatures"),
+  ]);
+  signingProxies = proxiesResult.status === "fulfilled" ? proxiesResult.value.items : [];
+  const fallbackIdentity = signingProxies.find((proxy) => proxy.available && proxy.identity)?.identity;
+  if (identityResult.status === "fulfilled" || fallbackIdentity) {
+    showSigner(identityResult.status === "fulfilled" ? identityResult.value : fallbackIdentity);
+  } else {
+    signerIdentity = null;
+    document.querySelector("#signer").classList.add("unavailable");
+    document.querySelector("#signer-name").textContent = "Certificato non disponibile";
+  }
+  graphicSignatures = graphicsResult.status === "fulfilled" ? graphicsResult.value.items : [];
+}
+
+function currentGraphicVersion(graphic) {
+  return graphic?.versions.find((version) => version.version_number === graphic.current_version_number);
+}
+
+function availableSigningProxies() {
+  return signingProxies.filter((proxy) => proxy.available && proxy.identity);
+}
+
+function populateSignDialog(item) {
+  const modeSelect = document.querySelector("#signature-mode");
+  modeSelect.replaceChildren();
+  const addMode = (value, label, enabled) => {
+    if (!item.capabilities.includes(value)) return;
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.disabled = !enabled;
+    modeSelect.append(option);
+  };
+  addMode("cades", "CAdES — file .p7m", availableSigningProxies().length > 0 || Boolean(signerIdentity));
+  addMode("graphic", "Firma grafica — PDF", graphicSignatures.length > 0);
+
+  const unavailable = item.capabilities.filter((mode) => ["pades", "xades"].includes(mode));
+  const unavailableNote = document.querySelector("#unavailable-modes");
+  unavailableNote.hidden = unavailable.length === 0;
+  unavailableNote.textContent = unavailable.length ? `${unavailable.map((mode) => mode.toUpperCase()).join(" e ")} non sono ancora disponibili.` : "";
+
+  const proxySelect = document.querySelector("#signing-proxy");
+  proxySelect.replaceChildren();
+  const availableProxies = availableSigningProxies();
+  for (const proxy of availableProxies) {
+    const option = document.createElement("option");
+    option.value = proxy.id;
+    option.textContent = `${proxy.name} — ${proxy.identity.display_name}`;
+    proxySelect.append(option);
+  }
+  document.querySelector("#proxy-selector-field").hidden = availableProxies.length <= 1;
+
+  const graphicSelect = document.querySelector("#graphic-signature");
+  graphicSelect.replaceChildren();
+  for (const graphic of graphicSignatures) {
+    const version = currentGraphicVersion(graphic);
+    if (!version) continue;
+    const option = document.createElement("option");
+    option.value = version.id;
+    option.textContent = `${graphic.name} · versione ${version.version_number}`;
+    graphicSelect.append(option);
+  }
+
+  const usable = [...modeSelect.options].find((option) => !option.disabled);
+  if (usable) modeSelect.value = usable.value;
+  document.querySelector("#confirm-sign").disabled = !usable;
+  updateSignMode();
+}
+
+function openSignDialog(item) {
+  signingDocument = item;
+  activeJobId = null;
+  placements = [];
+  selectedPlacementId = null;
+  clearTimeout(jobPollTimer);
+  document.querySelector("#dialog-document").textContent = item.original_name;
+  document.querySelector("#sign-config").hidden = false;
+  document.querySelector("#sign-progress").hidden = true;
+  document.querySelector("#download-result").hidden = true;
+  const confirm = document.querySelector("#confirm-sign");
+  confirm.hidden = false;
+  confirm.textContent = "Conferma e firma";
+  document.querySelector("#signing-pin").value = "";
+  document.querySelector("#cades-strategy").value = "nested";
+  const legacyP7m = item.input_format === "opaque" && item.original_name.toLowerCase().endsWith(".p7m");
+  const hasPdfPreview = ["pdf", "cms_attached"].includes(item.input_format) || legacyP7m;
+  document.querySelector("#sign-dialog").classList.toggle("compact", !hasPdfPreview);
+  document.querySelector("#preview-column").hidden = !hasPdfPreview;
+  document.querySelector("#embedded-pdf-label").hidden = item.input_format !== "cms_attached" && !legacyP7m;
+  const previewUrl = `/api/v1/documents/${item.id}/preview`;
+  document.querySelector("#preview-fallback").href = previewUrl;
+  if (hasPdfPreview) {
+    const previewToken = ++pdfPreviewToken;
+    pdfPreviewPromise = import("/static/pdf-preview.js");
+    pdfPreviewPromise.then((preview) => {
+      if (previewToken === pdfPreviewToken) preview.openPdf(previewUrl);
+    });
+  }
+  populateSignDialog(item);
+  renderPlacements();
+  document.querySelector("#sign-dialog").showModal();
+}
+
+function selectedProxyIdentity() {
+  const availableProxies = availableSigningProxies();
+  if (availableProxies.length === 1) return availableProxies[0].identity;
+  const proxyId = document.querySelector("#signing-proxy").value;
+  if (proxyId) return availableProxies.find((proxy) => proxy.id === proxyId)?.identity || null;
+  return signerIdentity;
+}
+
+function selectedCertificateConfig() {
+  const availableProxies = availableSigningProxies();
+  if (availableProxies.length === 1) return availableProxies[0];
+  const proxyId = document.querySelector("#signing-proxy").value;
+  return availableProxies.find((proxy) => proxy.id === proxyId) || null;
+}
+
+function selectedProxyId() {
+  const availableProxies = availableSigningProxies();
+  if (availableProxies.length === 1) return availableProxies[0].id;
+  return document.querySelector("#signing-proxy").value || null;
+}
+
+function renderSelectedSigner(identity) {
+  const container = document.querySelector("#selected-signer");
+  container.replaceChildren();
+  if (!identity) {
+    container.textContent = "Nessun certificato disponibile.";
+    return;
+  }
+  const name = document.createElement("strong");
+  name.textContent = identity.display_name;
+  const details = document.createElement("dl");
+  for (const [label, value] of [
+    ["Soggetto", identity.subject],
+    ["Emittente", identity.issuer],
+    ["Numero di serie", identity.serial_number],
+    ["Validità", `${formatDate(identity.not_valid_before)} – ${formatDate(identity.not_valid_after)}`],
+  ]) {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = value;
+    row.append(term, description);
+    details.append(row);
+  }
+  container.append(name, details);
+}
+
+function updateSignMode() {
+  const mode = document.querySelector("#signature-mode").value;
+  const graphic = mode === "graphic";
+  const cmsInput = signingDocument?.input_format === "cms_attached";
+  document.querySelector("#cades-strategy-field").hidden = mode !== "cades" || !cmsInput;
+  document.querySelector("#proxy-field").hidden = graphic;
+  document.querySelector("#graphic-fields").hidden = !graphic;
+  const selectedCertificate = selectedCertificateConfig();
+  const needsPin = !graphic && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin;
+  document.querySelector("#signing-pin-field").hidden = !needsPin;
+  const identity = selectedProxyIdentity();
+  renderSelectedSigner(identity);
+  updateSignSummary();
+}
+
+function updateSignSummary() {
+  const mode = document.querySelector("#signature-mode").value;
+  const summary = document.querySelector("#sign-summary");
+  if (mode === "graphic") {
+    summary.textContent = placements.length ? `${placements.length} posizione/i configurata/e. Questa modalità applica soltanto l'immagine, senza firma digitale.` : "Aggiungi almeno una posizione per continuare.";
+  } else {
+    const identity = selectedProxyIdentity();
+    const strategy = document.querySelector("#cades-strategy").value;
+    const strategyText = signingDocument?.input_format === "cms_attached"
+      ? (strategy === "parallel" ? " con una firma parallela alle firme esistenti" : " aggiungendo un nuovo livello a matrioska")
+      : "";
+    summary.textContent = identity ? `Conferma: il file verrà firmato in formato CAdES${strategyText} da ${identity.display_name}.` : "Seleziona un certificato disponibile.";
+  }
+}
+
+function findGraphicVersion(versionId) {
+  for (const graphic of graphicSignatures) {
+    const version = graphic.versions.find((candidate) => candidate.id === versionId);
+    if (version) return { graphic, version };
+  }
+  return null;
+}
+
+async function addPlacement() {
+  try {
+    const versionId = document.querySelector("#graphic-signature").value;
+    const selected = findGraphicVersion(versionId);
+    const preview = await pdfPreviewPromise;
+    if (!selected || !preview) throw new Error("Seleziona una firma grafica disponibile.");
+    const stage = document.querySelector("#pdf-stage");
+    const width = 0.25;
+    const pageRatio = stage.clientWidth / stage.clientHeight;
+    const imageRatio = selected.version.height_pixels / selected.version.width_pixels;
+    const height = Math.min(0.3, Math.max(0.04, width * pageRatio * imageRatio));
+    const placement = {
+      _clientId: crypto.randomUUID(),
+      graphic_signature_version_id: versionId,
+      page: preview.currentPageNumber(),
+      x: Math.max(0, 0.7 - width),
+      y: Math.max(0, 0.85 - height),
+      width,
+      height,
+      order: placements.length,
+    };
+    placements.push(placement);
+    selectedPlacementId = placement._clientId;
+    renderPlacements();
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+function renderPlacements() {
+  const list = document.querySelector("#placements");
+  list.replaceChildren();
+  placements.forEach((placement, index) => {
+    const item = document.createElement("li");
+    item.classList.toggle("selected", placement._clientId === selectedPlacementId);
+    const selected = findGraphicVersion(placement.graphic_signature_version_id);
+    const text = document.createElement("button");
+    text.type = "button";
+    text.className = "placement-link";
+    text.textContent = `${selected?.graphic.name || "Firma grafica"} · pagina ${placement.page}`;
+    text.addEventListener("click", async () => {
+      selectedPlacementId = placement._clientId;
+      const preview = await pdfPreviewPromise;
+      await preview.showPage(placement.page);
+      renderPlacements();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-button";
+    remove.textContent = "Rimuovi";
+    remove.addEventListener("click", () => {
+      placements.splice(index, 1);
+      placements = placements.map((entry, order) => ({ ...entry, order }));
+      renderPlacements();
+    });
+    item.append(text, remove);
+    list.append(item);
+  });
+  document.querySelector("#remove-placement").disabled = !selectedPlacementId;
+  renderPlacementLayer();
+  updateSignSummary();
+}
+
+function renderPlacementLayer() {
+  const layer = document.querySelector("#placement-layer");
+  layer.replaceChildren();
+  const page = Number(document.querySelector("#pdf-stage").dataset.pageNumber || 0);
+  for (const placement of placements.filter((entry) => entry.page === page)) {
+    const selected = findGraphicVersion(placement.graphic_signature_version_id);
+    if (!selected) continue;
+    const element = document.createElement("div");
+    element.className = "graphic-placement";
+    element.classList.toggle("selected", placement._clientId === selectedPlacementId);
+    element.style.left = `${placement.x * 100}%`;
+    element.style.top = `${placement.y * 100}%`;
+    element.style.width = `${placement.width * 100}%`;
+    element.style.height = `${placement.height * 100}%`;
+    const image = document.createElement("img");
+    image.alt = selected.graphic.name;
+    image.draggable = false;
+    image.src = `/api/v1/graphic-signatures/${selected.graphic.id}/versions/${selected.version.version_number}/image`;
+    const handle = document.createElement("span");
+    handle.className = "resize-handle";
+    handle.setAttribute("aria-label", "Ridimensiona firma");
+    element.append(image, handle);
+    element.addEventListener("pointerdown", (event) => {
+      if (event.target === handle) return;
+      startPlacementGesture(event, placement, element, false);
+    });
+    handle.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      startPlacementGesture(event, placement, element, true);
+    });
+    layer.append(element);
+  }
+}
+
+function startPlacementGesture(event, placement, element, resizing) {
+  event.preventDefault();
+  selectedPlacementId = placement._clientId;
+  document.querySelectorAll(".graphic-placement").forEach((candidate) => candidate.classList.remove("selected"));
+  element.classList.add("selected");
+  document.querySelector("#remove-placement").disabled = false;
+  const stage = document.querySelector("#pdf-stage");
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const initial = { x: placement.x, y: placement.y, width: placement.width, height: placement.height };
+  element.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => {
+    const deltaX = (moveEvent.clientX - startX) / stage.clientWidth;
+    const deltaY = (moveEvent.clientY - startY) / stage.clientHeight;
+    if (resizing) {
+      placement.width = Math.min(1 - placement.x, Math.max(0.03, initial.width + deltaX));
+      placement.height = Math.min(1 - placement.y, Math.max(0.03, initial.height + deltaY));
+      element.style.width = `${placement.width * 100}%`;
+      element.style.height = `${placement.height * 100}%`;
+    } else {
+      placement.x = Math.min(1 - placement.width, Math.max(0, initial.x + deltaX));
+      placement.y = Math.min(1 - placement.height, Math.max(0, initial.y + deltaY));
+      element.style.left = `${placement.x * 100}%`;
+      element.style.top = `${placement.y * 100}%`;
+    }
+  };
+  const finish = () => {
+    element.removeEventListener("pointermove", move);
+    element.removeEventListener("pointerup", finish);
+    element.removeEventListener("pointercancel", finish);
+    renderPlacements();
+  };
+  element.addEventListener("pointermove", move);
+  element.addEventListener("pointerup", finish);
+  element.addEventListener("pointercancel", finish);
+}
+
+function removeSelectedPlacement() {
+  const index = placements.findIndex((placement) => placement._clientId === selectedPlacementId);
+  if (index < 0) return;
+  placements.splice(index, 1);
+  placements = placements.map((placement, order) => ({ ...placement, order }));
+  selectedPlacementId = null;
+  renderPlacements();
+}
+
+async function submitSignature(event) {
+  event.preventDefault();
+  if (!signingDocument) return;
+  const mode = document.querySelector("#signature-mode").value;
+  if (mode === "graphic" && placements.length === 0) {
+    showNotice("Aggiungi e posiziona almeno una firma sul documento.", "error");
+    return;
+  }
+  const apiPlacements = placements.map(({ _clientId, ...placement }) => placement);
+  const payload = { mode, placements: mode === "graphic" ? apiPlacements : [] };
+  if (mode === "cades" && signingDocument.input_format === "cms_attached") {
+    payload.cades_strategy = document.querySelector("#cades-strategy").value;
+  }
+  const proxyId = selectedProxyId();
+  if (mode === "cades" && proxyId) payload.signing_proxy_id = proxyId;
+  const pinInput = document.querySelector("#signing-pin");
+  const selectedCertificate = selectedCertificateConfig();
+  if (mode === "cades" && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin) {
+    if (!pinInput.value) {
+      showNotice("Inserisci il PIN della smart card.", "error");
+      return;
+    }
+    payload.pin = pinInput.value;
+  }
+  pinInput.value = "";
+  const button = document.querySelector("#confirm-sign");
+  button.disabled = true;
+  try {
+    const job = await api(`/api/v1/documents/${signingDocument.id}/signatures`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    activeJobId = job.id;
+    activeDocumentJobs.set(job.document_id, job);
+    document.querySelector("#sign-config").hidden = true;
+    document.querySelector("#sign-progress").hidden = false;
+    renderJobStatus(job);
+    await loadDocuments();
+    scheduleJobPoll();
+  } catch (error) {
+    showNotice(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+function renderJobStatus(job) {
+  const [title, fallback] = jobLabels[job.status] || [job.status, ""];
+  document.querySelector("#progress-title").textContent = title;
+  document.querySelector("#progress-message").textContent = job.error_message || fallback;
+  const progress = document.querySelector("#sign-progress");
+  progress.className = `progress-card ${job.status}`;
+  const terminal = ["completed", "failed"].includes(job.status);
+  progress.querySelector(".spinner").hidden = terminal;
+  const confirm = document.querySelector("#confirm-sign");
+  confirm.hidden = job.status === "completed";
+  confirm.disabled = job.status !== "failed";
+  if (job.status === "failed") {
+    document.querySelector("#sign-config").hidden = false;
+    confirm.textContent = "Riprova";
+    updateSignMode();
+  }
+  if (job.status === "completed") {
+    const download = document.querySelector("#download-result");
+    download.href = `/api/v1/documents/${job.document_id}/result`;
+    download.hidden = false;
+    activeDocumentJobs.delete(job.document_id);
+  }
+  if (job.status === "failed") activeDocumentJobs.delete(job.document_id);
+}
+
+function scheduleJobPoll() {
+  clearTimeout(jobPollTimer);
+  if (!activeJobId) return;
+  jobPollTimer = setTimeout(async () => {
+    try {
+      const job = await api(`/api/v1/signature-jobs/${activeJobId}`);
+      handleJobUpdate(job);
+    } catch (error) {
+      document.querySelector("#progress-message").textContent = "Aggiornamento in tempo reale interrotto; nuovo tentativo in corso…";
+    }
+    if (activeJobId) scheduleJobPoll();
+  }, eventSocket?.readyState === WebSocket.OPEN ? 5000 : 1500);
+}
+
+function handleJobUpdate(job) {
+  if (["queued", "running"].includes(job.status)) activeDocumentJobs.set(job.document_id, job);
+  else activeDocumentJobs.delete(job.document_id);
+  if (job.id === activeJobId) {
+    renderJobStatus(job);
+    if (["completed", "failed"].includes(job.status)) {
+      activeJobId = null;
+      clearTimeout(jobPollTimer);
+      loadDocuments().catch(() => {});
+    }
+  }
+}
+
+function openOwnerDialog(item) {
+  ownerDocument = item;
+  document.querySelector("#owner-dialog-document").textContent = item.original_name;
+  const select = document.querySelector("#owner-select");
+  select.replaceChildren();
+  for (const user of eligibleOwners.filter((candidate) => candidate.id !== item.owner_user_id)) {
+    const option = document.createElement("option");
+    option.value = user.id;
+    option.textContent = `${user.display_name} (${roleLabels[user.role]})`;
+    select.append(option);
+  }
+  document.querySelector("#confirm-owner").disabled = select.options.length === 0;
+  document.querySelector("#owner-dialog").showModal();
+}
+
+async function changeSelectedOwner() {
+  if (!ownerDocument) return;
+  const userId = document.querySelector("#owner-select").value;
+  const button = document.querySelector("#confirm-owner");
+  if (!userId) return;
+  button.disabled = true;
+  try {
+    await api(`/api/v1/admin/documents/${ownerDocument.id}/owner`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ owner_user_id: userId }),
+    });
+    showNotice("Proprietario aggiornato.");
+    await loadDocuments();
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    ownerDocument = null;
+    button.disabled = false;
+  }
+}
+
+async function uploadDocument(file) {
+  const data = new FormData();
+  data.append("file", file);
+  try {
+    await api("/api/v1/documents", { method: "POST", body: data });
+    showNotice("Documento caricato.");
+    await loadDocuments();
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+function renderAdminGraphics(items) {
+  const container = document.querySelector("#graphics-admin");
+  container.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Il catalogo è vuoto.";
+    container.append(empty);
+    return;
+  }
+  for (const graphic of items) {
+    const card = document.createElement("article");
+    card.className = "admin-card";
+    const current = currentGraphicVersion(graphic);
+    const header = document.createElement("div");
+    header.className = "admin-card-header";
+    const preview = document.createElement("img");
+    preview.className = "graphic-thumb";
+    preview.alt = `Anteprima di ${graphic.name}`;
+    if (current) preview.src = `/api/v1/graphic-signatures/${graphic.id}/versions/${current.version_number}/image`;
+    const title = document.createElement("div");
+    const heading = document.createElement("strong");
+    heading.textContent = graphic.name;
+    const meta = document.createElement("span");
+    meta.className = "user-meta";
+    meta.textContent = `Versione corrente ${graphic.current_version_number} · ${graphic.active ? "Attiva" : "Disattivata"}`;
+    title.append(heading, meta);
+    header.append(preview, title);
+
+    const editor = document.createElement("div");
+    editor.className = "admin-editor";
+    const name = document.createElement("input");
+    name.value = graphic.name;
+    name.setAttribute("aria-label", "Nome firma grafica");
+    const description = document.createElement("input");
+    description.value = graphic.description;
+    description.placeholder = "Descrizione";
+    description.setAttribute("aria-label", "Descrizione firma grafica");
+    const activeLabel = document.createElement("label");
+    activeLabel.className = "check-field";
+    const active = document.createElement("input");
+    active.type = "checkbox";
+    active.checked = graphic.active;
+    activeLabel.append(active, document.createTextNode("Attiva"));
+    const save = document.createElement("button");
+    save.className = "button";
+    save.textContent = "Salva";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        await api(`/api/v1/admin/graphic-signatures/${graphic.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.value, description: description.value, active: active.checked }),
+        });
+        showNotice("Firma grafica aggiornata.");
+        await Promise.all([loadAdminGraphics(), loadSigningResources()]);
+        await loadDocuments();
+      } catch (error) {
+        showNotice(error.message, "error");
+        save.disabled = false;
+      }
+    });
+    editor.append(name, description, activeLabel, save);
+
+    const versions = document.createElement("div");
+    versions.className = "version-list";
+    for (const version of [...graphic.versions].sort((a, b) => b.version_number - a.version_number)) {
+      const line = document.createElement("div");
+      const link = document.createElement("a");
+      link.href = `/api/v1/graphic-signatures/${graphic.id}/versions/${version.version_number}/image`;
+      link.textContent = `Versione ${version.version_number} · ${version.width_pixels} × ${version.height_pixels} px`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "text-button";
+      remove.textContent = "Elimina";
+      remove.disabled = version.version_number === graphic.current_version_number;
+      remove.addEventListener("click", async () => {
+        if (!window.confirm(`Eliminare la versione ${version.version_number} di ${graphic.name}?`)) return;
+        try {
+          await api(`/api/v1/admin/graphic-signatures/${graphic.id}/versions/${version.version_number}`, { method: "DELETE" });
+          showNotice("Versione eliminata.");
+          await loadAdminGraphics();
+        } catch (error) {
+          showNotice(error.message, "error");
+        }
+      });
+      line.append(link, remove);
+      versions.append(line);
+    }
+
+    const versionForm = document.createElement("form");
+    versionForm.className = "inline-upload";
+    const file = document.createElement("input");
+    file.type = "file";
+    file.accept = "image/png";
+    file.required = true;
+    const upload = document.createElement("button");
+    upload.className = "button small";
+    upload.type = "submit";
+    upload.textContent = "Carica nuova versione";
+    versionForm.append(file, upload);
+    versionForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file.files[0]) return;
+      const data = new FormData();
+      data.append("image", file.files[0]);
+      upload.disabled = true;
+      try {
+        await api(`/api/v1/admin/graphic-signatures/${graphic.id}/versions`, { method: "POST", body: data });
+        showNotice("Nuova versione caricata.");
+        await Promise.all([loadAdminGraphics(), loadSigningResources()]);
+      } catch (error) {
+        showNotice(error.message, "error");
+        upload.disabled = false;
+      }
+    });
+    card.append(header, editor, versions, versionForm);
+    container.append(card);
+  }
+}
+
+async function loadAdminGraphics() {
+  const listing = await api("/api/v1/admin/graphic-signatures");
+  renderAdminGraphics(listing.items);
+}
+
+function renderAdminProxies(items) {
+  const container = document.querySelector("#proxies-admin");
+  container.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Non è configurato alcun certificato.";
+    container.append(empty);
+    return;
+  }
+  for (const proxy of items) {
+    const card = document.createElement("article");
+    card.className = "admin-card";
+    const header = document.createElement("div");
+    header.className = "admin-card-header";
+    const title = document.createElement("div");
+    const heading = document.createElement("strong");
+    heading.textContent = proxy.name;
+    const meta = document.createElement("span");
+    meta.className = "user-meta";
+    const backendLabel = proxy.backend === "local" ? "Locale" : "PKCS11 Web Proxy";
+    const pinLabel = proxy.backend === "local" ? ` · PIN ${proxy.pin_saved ? "salvato" : "richiesto a ogni firma"}` : "";
+    meta.textContent = `${backendLabel} · Configurazione v${proxy.version} · ${proxy.active ? "Attivo" : "Disattivato"}${pinLabel}`;
+    title.append(heading, meta);
+    header.append(title);
+
+    const editor = document.createElement("div");
+    editor.className = "admin-editor proxy-editor";
+    const name = document.createElement("input");
+    name.value = proxy.name;
+    name.setAttribute("aria-label", "Nome certificato");
+    const configurationInputs = [];
+    if (proxy.backend === "local") {
+      for (const [field, label, value] of [
+        ["pkcs11_library_path", "Libreria PKCS#11", proxy.pkcs11_library_path],
+        ["pkcs11_token_label", "Nome token", proxy.pkcs11_token_label],
+        ["pkcs11_certificate_label", "Nome certificato PKCS#11", proxy.pkcs11_certificate_label],
+      ]) {
+        const input = document.createElement("input");
+        input.value = value || "";
+        input.setAttribute("aria-label", label);
+        input.dataset.field = field;
+        configurationInputs.push(input);
+      }
+    } else {
+      const url = document.createElement("input");
+      url.value = proxy.base_url || "";
+      url.type = "url";
+      url.setAttribute("aria-label", "URL PKCS11 Web Proxy");
+      url.dataset.field = "base_url";
+      configurationInputs.push(url);
+    }
+    const activeLabel = document.createElement("label");
+    activeLabel.className = "check-field";
+    const active = document.createElement("input");
+    active.type = "checkbox";
+    active.checked = proxy.active;
+    activeLabel.append(active, document.createTextNode("Attivo"));
+    const save = document.createElement("button");
+    save.className = "button";
+    save.textContent = "Salva";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const body = { name: name.value, active: active.checked };
+        configurationInputs.forEach((input) => { body[input.dataset.field] = input.value; });
+        await api(`/api/v1/admin/signing-proxies/${proxy.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        showNotice("Certificato aggiornato.");
+        await Promise.all([loadAdminProxies(), loadSigningResources()]);
+      } catch (error) {
+        showNotice(error.message, "error");
+        save.disabled = false;
+      }
+    });
+    const check = document.createElement("button");
+    check.className = "button";
+    check.textContent = "Verifica certificato";
+    check.addEventListener("click", async () => {
+      check.disabled = true;
+      try {
+        const result = await api(`/api/v1/admin/signing-proxies/${proxy.id}/check`, { method: "POST" });
+        showNotice(result.available && result.identity ? `${proxy.name}: disponibile, certificato di ${result.identity.display_name}.` : `${proxy.name}: non disponibile.`, result.available ? "success" : "error");
+      } catch (error) {
+        showNotice(error.message, "error");
+      } finally {
+        check.disabled = false;
+      }
+    });
+    editor.append(name, ...configurationInputs, activeLabel, save, check);
+    if (proxy.backend === "local") {
+      const pinEditor = document.createElement("div");
+      pinEditor.className = "inline-upload";
+      const pin = document.createElement("input");
+      pin.type = "password";
+      pin.inputMode = "numeric";
+      pin.autocomplete = "new-password";
+      pin.placeholder = proxy.pin_saved ? "Nuovo PIN" : "PIN da salvare";
+      pin.setAttribute("aria-label", proxy.pin_saved ? "Nuovo PIN" : "PIN da salvare");
+      const savePin = document.createElement("button");
+      savePin.className = "button";
+      savePin.textContent = proxy.pin_saved ? "Sostituisci PIN" : "Salva PIN";
+      savePin.addEventListener("click", async () => {
+        if (!pin.value) {
+          showNotice("Inserisci il PIN.", "error");
+          return;
+        }
+        savePin.disabled = true;
+        try {
+          await api(`/api/v1/admin/signing-proxies/${proxy.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ saved_pin_action: "replace", pin: pin.value }),
+          });
+          pin.value = "";
+          showNotice(proxy.pin_saved ? "PIN sostituito." : "PIN salvato in forma cifrata.");
+          await Promise.all([loadAdminProxies(), loadSigningResources()]);
+        } catch (error) {
+          showNotice(error.message, "error");
+          savePin.disabled = false;
+        }
+      });
+      pinEditor.append(pin, savePin);
+      if (proxy.pin_saved) {
+        const removePin = document.createElement("button");
+        removePin.className = "button danger";
+        removePin.textContent = "Rimuovi PIN";
+        removePin.addEventListener("click", async () => {
+          removePin.disabled = true;
+          try {
+            await api(`/api/v1/admin/signing-proxies/${proxy.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ saved_pin_action: "remove" }),
+            });
+            showNotice("PIN rimosso.");
+            await Promise.all([loadAdminProxies(), loadSigningResources()]);
+          } catch (error) {
+            showNotice(error.message, "error");
+            removePin.disabled = false;
+          }
+        });
+        pinEditor.append(removePin);
+      }
+      card.append(header, editor, pinEditor);
+    } else {
+      card.append(header, editor);
+    }
+    container.append(card);
+  }
+}
+
+async function loadAdminProxies() {
+  const listing = await api("/api/v1/admin/signing-proxies");
+  renderAdminProxies(listing.items);
+}
+
+// Without a deployment secret the PIN is stored as typed; say so plainly, but
+// only once someone actually asks to save one.
+let pinEncryptionEnabled = true;
+
+function updatePinEncryptionWarning() {
+  const saving = document.querySelector("#new-save-pin").checked;
+  document.querySelector("#pin-encryption-warning").hidden = pinEncryptionEnabled || !saving;
+}
+
+async function loadKnownPkcs11Libraries() {
+  const result = await api("/api/v1/admin/signing-proxies/local/libraries");
+  pinEncryptionEnabled = result.pin_encryption_enabled !== false;
+  document.querySelector("#save-pin-label").textContent =
+    pinEncryptionEnabled ? "Salva il PIN cifrato" : "Salva il PIN (in chiaro)";
+  updatePinEncryptionWarning();
+  const choice = document.querySelector("#new-pkcs11-library-choice");
+  const previousPath = selectedLocalLibraryPath();
+  choice.replaceChildren();
+  result.items.forEach((path) => {
+    const option = document.createElement("option");
+    option.value = path;
+    option.textContent = path;
+    option.selected = path === previousPath;
+    choice.append(option);
+  });
+  const other = document.createElement("option");
+  other.value = "__other__";
+  other.textContent = "Altro…";
+  if (previousPath && !result.items.includes(previousPath)) {
+    other.selected = true;
+    document.querySelector("#new-pkcs11-library").value = previousPath;
+  }
+  choice.append(other);
+  if (!choice.value) choice.value = result.items.length ? result.items[0] : "__other__";
+  updateLocalLibraryChoice();
+  if (
+    document.querySelector("#new-certificate-backend").value === "local"
+    && selectedLocalLibraryPath()
+  ) {
+    await discoverLocalCertificates({ announce: false });
+  }
+}
+
+function selectedLocalLibraryPath() {
+  const choice = document.querySelector("#new-pkcs11-library-choice");
+  if (!choice || choice.value === "__other__") {
+    return document.querySelector("#new-pkcs11-library")?.value.trim() || "";
+  }
+  return choice.value;
+}
+
+function clearLocalCertificateDiscovery(message = "Seleziona un middleware.", invalidate = true) {
+  if (invalidate) localDiscoveryToken += 1;
+  discoveredLocalCertificates = [];
+  const select = document.querySelector("#new-pkcs11-certificate");
+  select.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = message;
+  select.append(option);
+  select.disabled = true;
+}
+
+function updateLocalLibraryChoice() {
+  const custom = document.querySelector("#new-pkcs11-library-choice").value === "__other__";
+  document.querySelector("#new-pkcs11-library-custom-field").hidden = !custom;
+  document.querySelector("#new-pkcs11-library").required = custom;
+}
+
+async function localLibraryExists(path) {
+  const result = await api("/api/v1/admin/signing-proxies/local/library-status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ library_path: path }),
+  });
+  return result.exists;
+}
+
+async function discoverLocalCertificates({ announce = true, checkExists = false } = {}) {
+  const path = selectedLocalLibraryPath();
+  const button = document.querySelector("#discover-pkcs11");
+  if (!path) {
+    clearLocalCertificateDiscovery();
+    return;
+  }
+  const token = ++localDiscoveryToken;
+  if (checkExists && !(await localLibraryExists(path))) {
+    if (token === localDiscoveryToken) {
+      clearLocalCertificateDiscovery("Il file non esiste.");
+    }
+    return;
+  }
+  button.disabled = true;
+  clearLocalCertificateDiscovery("Rilevamento in corso…");
+  const requestToken = localDiscoveryToken;
+  try {
+    const result = await api("/api/v1/admin/signing-proxies/local/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ library_path: path }),
+    });
+    if (requestToken !== localDiscoveryToken || path !== selectedLocalLibraryPath()) return;
+    discoveredLocalCertificates = result.items;
+    const select = document.querySelector("#new-pkcs11-certificate");
+    select.replaceChildren();
+    result.items.forEach((item, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `${item.identity.display_name} — ${item.certificate_label} (token ${item.token_label})`;
+      select.append(option);
+    });
+    select.disabled = result.items.length === 0;
+    if (!result.items.length) clearLocalCertificateDiscovery("Nessun certificato rilevato.", false);
+    if (announce) showNotice(result.items.length ? `${result.items.length} certificati rilevati.` : "Nessun certificato rilevato.", result.items.length ? "success" : "error");
+  } catch (error) {
+    if (requestToken !== localDiscoveryToken) return;
+    clearLocalCertificateDiscovery("Rilevamento non riuscito.", false);
+    if (announce) showNotice(error.message, "error");
+  } finally {
+    if (requestToken === localDiscoveryToken) button.disabled = false;
+  }
+}
+
+function handleRealtimeSnapshot(snapshot) {
+  const fingerprint = JSON.stringify(snapshot);
+  if (fingerprint === realtimeFingerprint) return;
+  realtimeFingerprint = fingerprint;
+  activeDocumentJobs.clear();
+  for (const job of snapshot.jobs) {
+    if (["queued", "running"].includes(job.status) && !activeDocumentJobs.has(job.document_id)) {
+      activeDocumentJobs.set(job.document_id, job);
+    }
+    if (job.id === activeJobId) handleJobUpdate(job);
+  }
+  loadDocuments().catch(() => {});
+}
+
+function connectEvents() {
+  clearTimeout(reconnectTimer);
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  eventSocket = new WebSocket(`${protocol}//${window.location.host}/api/v1/events`);
+  eventSocket.addEventListener("message", (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.type === "snapshot") handleRealtimeSnapshot(payload);
+  });
+  eventSocket.addEventListener("close", () => {
+    eventSocket = null;
+    reconnectTimer = setTimeout(connectEvents, 3000);
+  });
+  eventSocket.addEventListener("error", () => eventSocket?.close());
+}
+
+function showPanel(panelId) {
+  document.querySelectorAll(".panel").forEach((panel) => { panel.hidden = panel.id !== panelId; });
+  document.querySelectorAll(".nav-button").forEach((button) => { button.classList.toggle("active", button.dataset.panel === panelId); });
+  if (panelId === "users-panel") loadUsers().catch((error) => showNotice(error.message, "error"));
+  if (panelId === "graphics-panel") loadAdminGraphics().catch((error) => showNotice(error.message, "error"));
+  if (panelId === "proxies-panel") {
+    Promise.all([loadAdminProxies(), loadKnownPkcs11Libraries()]).catch((error) => showNotice(error.message, "error"));
+  }
+}
+
+let authMode = "local";
+
+function showLogin(message) {
+  document.querySelector("#loading").hidden = true;
+  document.querySelector("#app").hidden = true;
+  document.querySelector("#main-nav").hidden = true;
+  document.querySelector("#account").hidden = true;
+  const error = document.querySelector("#login-error");
+  error.textContent = message || "";
+  error.hidden = !message;
+  document.querySelector("#login").hidden = false;
+  document.querySelector("#login-username").focus();
+}
+
+async function start() {
+  try {
+    const status = await api("/api/v1/auth/status");
+    authMode = status.auth_mode;
+    if (!status.authenticated) {
+      showLogin("");
+      return;
+    }
+  } catch {
+    // An older or differently configured server may not expose the status
+    // endpoint; fall back to probing the profile directly.
+  }
+  try {
+    const profile = await api("/api/v1/me");
+    currentProfile = profile;
+    document.querySelector("#login").hidden = true;
+    document.querySelector("#loading").hidden = true;
+    document.querySelector("#account-name").textContent = currentProfile.display_name;
+    // Local accounts manage their own password; a gateway owns it otherwise.
+    document.querySelector("#account-password").hidden = authMode !== "local";
+    document.querySelector("#account-logout").hidden = authMode !== "local";
+    document.querySelector("#account").hidden = false;
+    if (authMode === "local" && currentProfile.role === "admin" && !currentProfile.password_set) {
+      document.querySelector("#password-warning").hidden = false;
+    }
+    document.querySelector("#create-user-form").hidden = authMode !== "local";
+    if (!profile.access_granted) {
+      document.querySelector("#pending-name").textContent = currentProfile.display_name;
+      document.querySelector("#pending-message").textContent = currentProfile.access_message;
+      document.querySelector("#access-pending").hidden = false;
+      return;
+    }
+    document.querySelector("#app").hidden = false;
+    document.querySelector("#main-nav").hidden = false;
+    if (currentProfile.role === "admin") {
+      document.querySelector("#users-nav").hidden = false;
+      document.querySelector("#graphics-nav").hidden = false;
+      document.querySelector("#proxies-nav").hidden = false;
+      await loadUsers();
+    }
+    await loadSigningResources();
+    await loadDocuments();
+    connectEvents();
+  } catch (error) {
+    if (authMode === "local" && error.code === "authentication_required") {
+      showLogin("");
+      return;
+    }
+    document.querySelector("#loading p").textContent = error.message;
+  }
+}
+
+document.querySelector("#login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const error = document.querySelector("#login-error");
+  error.hidden = true;
+  try {
+    await api("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.querySelector("#login-username").value,
+        password: document.querySelector("#login-password").value,
+      }),
+    });
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  }
+  window.location.reload();
+});
+
+document.querySelector("#account-logout").addEventListener("click", async () => {
+  await api("/api/v1/auth/logout", { method: "POST" }).catch(() => null);
+  window.location.reload();
+});
+
+function openPasswordDialog() {
+  const dialog = document.querySelector("#password-dialog");
+  document.querySelector("#password-error").hidden = true;
+  document.querySelector("#new-password").value = "";
+  document.querySelector("#current-password").value = "";
+  // There is no current password to confirm during the first-run phase.
+  document.querySelector("#current-password-field").hidden = !currentProfile.password_set;
+  dialog.showModal();
+}
+
+let editingUser = null;
+
+function openUserDialog(user) {
+  editingUser = user;
+  document.querySelector("#user-error").hidden = true;
+  document.querySelector("#edit-username").value = user.username;
+  document.querySelector("#edit-display-name").value = user.display_name;
+  document.querySelector("#edit-email").value = user.email || "";
+  document.querySelector("#edit-password").value = "";
+  document.querySelector("#user-dialog").showModal();
+}
+
+document.querySelector("#user-cancel").addEventListener("click", () => {
+  document.querySelector("#user-dialog").close();
+});
+
+document.querySelector("#user-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const error = document.querySelector("#user-error");
+  error.hidden = true;
+  const password = document.querySelector("#edit-password").value;
+  try {
+    await api(`/api/v1/admin/users/${editingUser.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.querySelector("#edit-username").value.trim(),
+        display_name: document.querySelector("#edit-display-name").value.trim(),
+        email: document.querySelector("#edit-email").value.trim(),
+      }),
+    });
+    if (password) {
+      await api(`/api/v1/admin/users/${editingUser.id}/password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_password: password }),
+      });
+    }
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  }
+  document.querySelector("#user-dialog").close();
+  await loadUsers();
+  showNotice("Utente aggiornato.");
+});
+
+document.querySelector("#account-password").addEventListener("click", openPasswordDialog);
+document.querySelector("#set-password-now").addEventListener("click", openPasswordDialog);
+document.querySelector("#password-cancel").addEventListener("click", () => {
+  document.querySelector("#password-dialog").close();
+});
+
+document.querySelector("#password-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const error = document.querySelector("#password-error");
+  error.hidden = true;
+  try {
+    await api("/api/v1/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        current_password: document.querySelector("#current-password").value,
+        new_password: document.querySelector("#new-password").value,
+      }),
+    });
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  }
+  document.querySelector("#password-dialog").close();
+  document.querySelector("#password-warning").hidden = true;
+  currentProfile.password_set = true;
+  showNotice("Password aggiornata.");
+});
+
+document.querySelector("#create-user-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api("/api/v1/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: form.username.value.trim(),
+        display_name: form.display_name.value.trim(),
+        email: form.email.value.trim() || null,
+        role: form.role.value,
+        password: form.password.value,
+      }),
+    });
+    form.reset();
+    await loadUsers();
+    showNotice("Utente creato.");
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+});
+
+document.querySelector("#file-input").addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) uploadDocument(file);
+  event.target.value = "";
+});
+document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => showPanel(button.dataset.panel)));
+document.querySelector("#refresh-users").addEventListener("click", () => loadUsers().catch((error) => showNotice(error.message, "error")));
+document.querySelector("#create-graphic-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api("/api/v1/admin/graphic-signatures", { method: "POST", body: new FormData(form) });
+    form.reset();
+    showNotice("Firma grafica creata.");
+    await Promise.all([loadAdminGraphics(), loadSigningResources()]);
+    await loadDocuments();
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+});
+document.querySelector("#create-proxy-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const data = new FormData(form);
+  const backend = data.get("backend");
+  const body = { name: data.get("name"), backend };
+  if (backend === "local") {
+    const selectedIndex = Number(document.querySelector("#new-pkcs11-certificate").value);
+    const selected = discoveredLocalCertificates[selectedIndex];
+    if (!selected) {
+      showNotice("Rileva e seleziona un certificato PKCS#11.", "error");
+      return;
+    }
+    body.pkcs11_library_path = selectedLocalLibraryPath();
+    body.pkcs11_token_label = selected.token_label;
+    body.pkcs11_certificate_label = selected.certificate_label;
+    body.save_pin = document.querySelector("#new-save-pin").checked;
+    if (body.save_pin) body.pin = document.querySelector("#new-pkcs11-pin").value;
+  } else {
+    body.base_url = data.get("base_url");
+  }
+  try {
+    await api("/api/v1/admin/signing-proxies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    form.reset();
+    clearLocalCertificateDiscovery();
+    document.querySelector("#new-pin-field").hidden = true;
+    document.querySelector("#new-pkcs11-pin").required = false;
+    document.querySelector("#new-pkcs11-pin").value = "";
+    updatePinEncryptionWarning();
+    updateNewCertificateBackend();
+    showNotice("Certificato aggiunto.");
+    await Promise.all([loadAdminProxies(), loadSigningResources()]);
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+});
+function updateNewCertificateBackend() {
+  const local = document.querySelector("#new-certificate-backend").value === "local";
+  document.querySelector("#new-proxy-url-field").hidden = local;
+  document.querySelector("#new-proxy-url").required = !local;
+  document.querySelector("#new-local-certificate-fields").hidden = !local;
+  document.querySelector("#new-pkcs11-library-choice").required = local;
+  if (local) loadKnownPkcs11Libraries().catch((error) => showNotice(error.message, "error"));
+}
+document.querySelector("#new-certificate-backend").addEventListener("change", updateNewCertificateBackend);
+document.querySelector("#new-save-pin").addEventListener("change", (event) => {
+  document.querySelector("#new-pin-field").hidden = !event.target.checked;
+  document.querySelector("#new-pkcs11-pin").required = event.target.checked;
+  updatePinEncryptionWarning();
+});
+document.querySelector("#new-pkcs11-library-choice").addEventListener("change", () => {
+  clearTimeout(localLibraryDebounceTimer);
+  updateLocalLibraryChoice();
+  clearLocalCertificateDiscovery();
+  if (selectedLocalLibraryPath()) discoverLocalCertificates({ announce: false }).catch((error) => showNotice(error.message, "error"));
+});
+document.querySelector("#new-pkcs11-library").addEventListener("input", () => {
+  clearTimeout(localLibraryDebounceTimer);
+  clearLocalCertificateDiscovery("Attendo un percorso valido…");
+  localLibraryDebounceTimer = setTimeout(() => {
+    discoverLocalCertificates({ announce: false, checkExists: true }).catch((error) => showNotice(error.message, "error"));
+  }, 600);
+});
+document.querySelector("#discover-pkcs11").addEventListener("click", () => discoverLocalCertificates({ checkExists: true }));
+document.querySelector("#signature-mode").addEventListener("change", updateSignMode);
+document.querySelector("#cades-strategy").addEventListener("change", updateSignSummary);
+document.querySelector("#signing-proxy").addEventListener("change", updateSignMode);
+document.querySelector("#add-placement").addEventListener("click", addPlacement);
+document.querySelector("#remove-placement").addEventListener("click", removeSelectedPlacement);
+document.querySelector("#pdf-stage").addEventListener("pdf-page-rendered", renderPlacementLayer);
+document.querySelector("#sign-form").addEventListener("submit", submitSignature);
+document.querySelector("#cancel-sign").addEventListener("click", () => document.querySelector("#sign-dialog").close());
+document.querySelector("#sign-dialog").addEventListener("close", () => {
+  signingDocument = null;
+  activeJobId = null;
+  clearTimeout(jobPollTimer);
+  pdfPreviewToken += 1;
+  if (pdfPreviewPromise) pdfPreviewPromise.then((preview) => preview.closePdf());
+});
+document.querySelector("#owner-dialog").addEventListener("close", (event) => {
+  if (event.target.returnValue === "confirm") changeSelectedOwner();
+});
+
+start();
