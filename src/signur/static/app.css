@@ -104,6 +104,11 @@ dialog h2 { margin: 8px 0 18px; font: 650 1.8rem/1.15 Georgia, serif; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
 .field { display: grid; gap: 7px; color: #526057; font-size: .86rem; font-weight: 700; }
 .field select, .field input { width: 100%; padding: 11px 12px; border: 1px solid #bdc9c0; border-radius: 9px; background: white; color: #1c3125; }
+dialog .admin-form { display: grid; align-items: stretch; gap: 16px; margin: 0; padding: 0; border: 0; background: none; }
+dialog .admin-form > .field { min-width: 0; }
+dialog .admin-form > .field + .field-help { margin-top: -9px; }
+dialog .admin-form > .notice { margin: 0; }
+dialog .admin-form > .dialog-actions { margin-top: 6px; }
 .sign-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); gap: 24px; }
 .sign-layout:has(.preview-column[hidden]) { grid-template-columns: minmax(0, 1fr); }
 .preview-column { min-height: 560px; border: 1px solid #d5ded7; border-radius: 10px; overflow: hidden; background: #e8ebe7; }
@@ -166,7 +171,9 @@ legend { padding: 0 6px; color: #526057; font-size: .86rem; font-weight: 700; }
 .account { display: flex; align-items: center; gap: 10px; }
 .notice.warning { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; background: #fdf1dc; color: #6d4a12; border: 1px solid #e8c98a; }
 .notice.warning strong { font-weight: 800; }
-.login-form { max-width: 360px; margin: 24px auto 0; text-align: left; }
+.login-form { display: grid; align-items: stretch; gap: 16px; max-width: 360px; margin: 24px auto 0; text-align: left; }
+.login-form .field { min-width: 0; }
+.login-form .notice { margin: 0; }
 #password-dialog { border: 1px solid #d8dfda; border-radius: 12px; padding: 22px 24px; max-width: 420px; }
 #password-dialog::backdrop { background: rgba(24, 63, 43, .35); }
 #password-dialog h2 { margin: 0 0 6px; font: 650 1.4rem/1.2 Georgia, serif; }
