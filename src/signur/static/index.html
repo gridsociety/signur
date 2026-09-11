@@ -155,15 +155,15 @@
             <div class="certificate-general-fields">
               <label class="field" for="new-proxy-name">Nome del certificato<input id="new-proxy-name" name="name" required maxlength="255" placeholder="Es. Carta ufficio"></label>
               <label class="field" for="new-certificate-backend">Tipo di collegamento<select id="new-certificate-backend" name="backend">
-                <option value="pkcs11_web_proxy">PKCS11 Web Proxy</option>
                 <option value="local">Locale</option>
+                <option value="pkcs11_web_proxy">PKCS11 Web Proxy</option>
               </select></label>
             </div>
-            <div id="new-proxy-url-field" class="certificate-backend-fields">
+            <div id="new-proxy-url-field" class="certificate-backend-fields" hidden>
               <span class="form-section-title">Configurazione del proxy</span>
               <label class="field" for="new-proxy-url">URL interno<input id="new-proxy-url" name="base_url" type="url" maxlength="1000" placeholder="https://10.0.0.10:8443"></label>
             </div>
-            <div id="new-local-certificate-fields" class="certificate-backend-fields local-certificate-fields" hidden>
+            <div id="new-local-certificate-fields" class="certificate-backend-fields local-certificate-fields">
               <span class="form-section-title">Configurazione locale</span>
               <div class="certificate-middleware-fields">
                 <label class="field" for="new-pkcs11-library-choice">Middleware PKCS#11<select id="new-pkcs11-library-choice"></select></label>

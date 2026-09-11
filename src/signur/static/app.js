@@ -1188,7 +1188,8 @@ function showPanel(panelId) {
   if (panelId === "users-panel") loadUsers().catch((error) => showNotice(error.message, "error"));
   if (panelId === "graphics-panel") loadAdminGraphics().catch((error) => showNotice(error.message, "error"));
   if (panelId === "proxies-panel") {
-    Promise.all([loadAdminProxies(), loadKnownPkcs11Libraries()]).catch((error) => showNotice(error.message, "error"));
+    updateNewCertificateBackend();
+    loadAdminProxies().catch((error) => showNotice(error.message, "error"));
   }
 }
 
