@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 386 386" width="386" height="386" role="img" aria-label="Signur">
+  <!--
+    Signur mark, redrawn as vectors from assets/signur.png.
+    Everything is built from primitives: the disc and the bow are true circles,
+    the bit corners and the stem tip are circular arcs, the moustache is cubic
+    Beziers. The white keyline is one stroke around the union of key and
+    moustache, so it stays exactly concentric with the shapes it follows.
+    Mirror axis: x = 193. Bow centre: (193, 93.4).
+  -->
+  <defs>
+    <!-- Brushed steel: lit left half, shaded right half, hard break on the axis -->
+    <linearGradient id="sig-steel" gradientUnits="userSpaceOnUse" x1="136.6" y1="0" x2="249.4" y2="0">
+      <stop offset="0" stop-color="#b0afaa"/>
+      <stop offset=".5" stop-color="#bbbab5"/>
+      <stop offset=".5" stop-color="#797773"/>
+      <stop offset="1" stop-color="#96948e"/>
+    </linearGradient>
+
+    <!-- Chamfer around the bow hole: dark top left, bright bottom right -->
+    <linearGradient id="sig-chamfer" gradientUnits="userSpaceOnUse" x1="166.6" y1="67" x2="219.4" y2="119.8">
+      <stop offset="0" stop-color="#83817c"/>
+      <stop offset="1" stop-color="#bdbbb5"/>
+    </linearGradient>
+
+    <!-- Key: bow (r 56.4, hole r 35.7), stem, bit. Outer contour then hole. -->
+    <path id="sig-key" fill-rule="evenodd" d="
+      M193 37
+      A56.4 56.4 0 0 1 207 148.03
+      L207 290     A2 2 0 0 0 209 292
+      L215.3 292   A2 2 0 0 0 217.3 290
+      L217.3 280.7 A2 2 0 0 1 219.3 278.7
+      L240.4 278.7 A2 2 0 0 1 242.4 280.7
+      L242.4 293.6 A2 2 0 0 1 240.4 295.6
+      L231.3 295.6 A2 2 0 0 0 229.3 297.6
+      L229.3 313   A2 2 0 0 0 231.3 315
+      L240.4 315   A2 2 0 0 1 242.4 317
+      L242.4 330   A2 2 0 0 1 240.4 332
+      L209 332     A2 2 0 0 0 207 334
+      L207 339.4   A7.8 7.8 0 0 1 199.2 347.2
+      L186.8 347.2 A7.8 7.8 0 0 1 179 339.4
+      L179 148.03
+      A56.4 56.4 0 0 1 193 37
+      Z
+      M193 57.7 A35.7 35.7 0 0 0 193 129.1 A35.7 35.7 0 0 0 193 57.7 Z"/>
+
+    <!-- Moustache: two mirrored halves, each ending in a rolled spiral tip.
+         Only three corners are cusps: the notch at the top of the axis, the
+         point at the bottom of the axis, and the tip of each curl. -->
+    <path id="sig-moustache" d="
+      M193 167
+      C186.5 161.5 177.5 155 167.5 155
+      C152 155 139.3 167.7 126.5 180.5
+      C121.27 185.73 113.99 191.65 104 192
+      C96 192.28 91.73 187.25 91.5 180.75
+      C91.34 176.25 93.42 171.4 98 171
+      C100.99 170.74 104 170.6 106.5 170.5
+      C105 165.8 98.99 166.36 95 166.15
+      C86.01 165.68 78.97 177.01 78.6 187.5
+      C78.2 198.99 87.23 214.16 101.75 219.3
+      C116.27 224.44 133.31 224.29 150.25 220.3
+      C163 217.3 180 209 193 196.5
+      C206 209 223 217.3 235.75 220.3
+      C252.69 224.29 269.73 224.44 284.25 219.3
+      C298.77 214.16 307.8 198.99 307.4 187.5
+      C307.03 177.01 299.99 165.68 291 166.15
+      C287.01 166.36 281 165.8 279.5 170.5
+      C282 170.6 285.01 170.74 288 171
+      C292.58 171.4 294.66 176.25 294.5 180.75
+      C294.27 187.25 290 192.28 282 192
+      C272.01 191.65 264.73 185.73 259.5 180.5
+      C246.7 167.7 234 155 218.5 155
+      C208.5 155 199.5 161.5 193 167
+      Z"/>
+  </defs>
+
+  <circle cx="193" cy="193" r="193" fill="#383838"/>
+
+  <!-- One white keyline around the union: the shared edges fall inside and
+       never show, so no seam appears where the moustache crosses the stem. -->
+  <g fill="#fff" stroke="#fff" stroke-width="14.4" stroke-linejoin="round">
+    <use href="#sig-key"/>
+    <use href="#sig-moustache"/>
+  </g>
+
+  <use href="#sig-key" fill="url(#sig-steel)"/>
+  <circle cx="193" cy="93.4" r="37.3" fill="none" stroke="url(#sig-chamfer)" stroke-width="3.4"/>
+
+  <use href="#sig-moustache" fill="#4b2d14"/>
+</svg>

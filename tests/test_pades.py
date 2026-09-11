@@ -265,3 +265,17 @@ def test_a_card_with_a_short_key_can_still_sign() -> None:
     result = build_pades_b_b(original, card, card.identity)
 
     verify_pades_b_b(result, original)
+
+
+def test_an_invisible_signature_still_carries_an_appearance() -> None:
+    """The PDF specification wants an appearance on an annotation, even an empty one."""
+    original = _pdf_bytes()
+    card = DirectSigningClient("Mario Firmatario")
+
+    result = build_pades_b_b(original, card, card.identity)
+
+    widget = _annotations(PdfFileReader(io.BytesIO(result), strict=True), 0)[0]
+    assert [float(value) for value in widget["/Rect"]] == [0, 0, 0, 0]
+    appearance = widget["/AP"]["/N"].get_object()
+    assert [float(value) for value in appearance["/BBox"]] == [0, 0, 0, 0]
+    assert appearance.data == b""

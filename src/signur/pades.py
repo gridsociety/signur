@@ -4,6 +4,7 @@ from typing import cast
 
 from PIL import Image
 from pyhanko import stamp
+from pyhanko.pdf_utils import generic
 from pyhanko.pdf_utils import images as pdf_images
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.layout import (
@@ -43,6 +44,28 @@ def _appearance(png: bytes) -> stamp.StaticStampStyle:
             inner_content_scaling=InnerScaling.STRETCH_FILL,
         ),
     )
+
+
+def _empty_appearance(writer: IncrementalPdfFileWriter, field_name: str) -> None:
+    """Give an invisible field the appearance the PDF specification asks for.
+
+    There is nothing to draw inside a rectangle of no area, but an annotation is
+    supposed to carry an appearance, and other tools write this empty form too.
+    """
+    for name, _value, reference in fields.enumerate_sig_fields(writer):
+        if name != field_name:
+            continue
+        field = reference.get_object()
+        form = generic.StreamObject(stream_data=b"")
+        form[generic.pdf_name("/Type")] = generic.pdf_name("/XObject")
+        form[generic.pdf_name("/Subtype")] = generic.pdf_name("/Form")
+        corners = [generic.NumberObject(0) for _ in range(4)]  # type: ignore[no-untyped-call]
+        form[generic.pdf_name("/BBox")] = generic.ArrayObject(corners)
+        field[generic.pdf_name("/AP")] = generic.DictionaryObject(  # type: ignore[no-untyped-call]
+            {generic.pdf_name("/N"): writer.add_object(form)}
+        )
+        writer.update_container(field)
+        return
 
 
 def _free_field_name(writer: IncrementalPdfFileWriter) -> str:
@@ -87,6 +110,8 @@ async def build_pades_b_b_async(
             )
             stamp_style = _appearance(placement.png)
         fields.append_signature_field(writer, spec)
+        if placement is None:
+            _empty_appearance(writer, field_name)
         pdf_signer = signers.PdfSigner(
             signers.PdfSignatureMetadata(
                 field_name=field_name,
