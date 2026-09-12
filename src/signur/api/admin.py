@@ -1,8 +1,8 @@
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from signur.audit import record_event
 from signur.auth import LOCAL_AUTHORITY, AdminUser, DbSession, find_local_user
@@ -38,10 +38,28 @@ def list_users(
     session: DbSession,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query(max_length=255)] = None,
+    role: Annotated[list[UserRole] | None, Query()] = None,
 ) -> UserList:
-    total = session.scalar(select(func.count(User.id))) or 0
+    filters: list[Any] = []
+    if role:
+        filters.append(User.role.in_(role))
+    if search and search.strip():
+        pattern = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                User.display_name.ilike(pattern),
+                User.external_id.ilike(pattern),
+                User.email.ilike(pattern),
+            )
+        )
+    total = session.scalar(select(func.count(User.id)).where(*filters)) or 0
     users = session.scalars(
-        select(User).order_by(User.first_seen_at, User.id).limit(limit).offset(offset)
+        select(User)
+        .where(*filters)
+        .order_by(User.first_seen_at, User.id)
+        .limit(limit)
+        .offset(offset)
     ).all()
     return UserList(
         items=[UserView.model_validate(user) for user in users],

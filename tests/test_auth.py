@@ -68,7 +68,7 @@ def test_home_assets_are_public_but_do_not_contain_protected_data(client):  # ty
     assert "loadAdminProxies" in script.text
     assert "saveUserRole" in script.text
     assert "deleteDocument" in script.text
-    assert "hasOtherEligibleUser" in script.text
+    assert "canTransferOwnership" in script.text
     assert "availableProxies.length === 1" in script.text
     assert "legacyP7m" in script.text
     assert "signatureModeLabels" in script.text

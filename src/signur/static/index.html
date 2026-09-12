@@ -109,7 +109,22 @@
               </details>
             </div>
           </aside>
+          <div class="filters">
+            <label class="field" for="documents-search">Cerca per nome file<input id="documents-search" type="search" placeholder="Nome del file" autocomplete="off" maxlength="255"></label>
+            <div id="owner-filter" class="field" hidden>
+              <span class="field-label" id="owner-filter-label">Proprietario</span>
+              <div class="combobox">
+                <div class="combobox-box">
+                  <div id="owner-chips" class="chips"></div>
+                  <input id="owner-search" type="text" role="combobox" aria-expanded="false" aria-controls="owner-options" aria-autocomplete="list" aria-labelledby="owner-filter-label" autocomplete="off" placeholder="Tutti">
+                  <button id="owner-clear" type="button" class="icon-button" aria-label="Azzera il filtro sul proprietario" hidden>×</button>
+                </div>
+                <ul id="owner-options" class="combobox-options" role="listbox" aria-multiselectable="true" hidden></ul>
+              </div>
+            </div>
+          </div>
           <section id="documents" class="documents" aria-live="polite"></section>
+          <nav id="documents-pager" class="pager" aria-label="Pagine dei documenti"></nav>
         </section>
 
         <section id="users-panel" class="panel" hidden>
@@ -133,7 +148,11 @@
             <label class="field" for="new-user-password">Password<input id="new-user-password" name="password" type="password" minlength="8" required autocomplete="new-password"></label>
             <button class="button primary" type="submit">Crea utente</button>
           </form>
+          <div class="filters">
+            <label class="field" for="users-search">Cerca per nome o email<input id="users-search" type="search" placeholder="Nome, utenza o email" autocomplete="off" maxlength="255"></label>
+          </div>
           <section id="users" class="users" aria-live="polite"></section>
+          <nav id="users-pager" class="pager" aria-label="Pagine degli utenti"></nav>
         </section>
 
         <section id="graphics-panel" class="panel" hidden>
@@ -283,8 +302,10 @@
         <span class="eyebrow">Amministrazione</span>
         <h2>Cambiare proprietario?</h2>
         <p><strong id="owner-dialog-document"></strong></p>
+        <label class="field" for="owner-dialog-search">Cerca per nome o email<input id="owner-dialog-search" type="search" placeholder="Nome, utenza o email" autocomplete="off" maxlength="255"></label>
         <label class="field" for="owner-select">Nuovo proprietario<select id="owner-select"></select></label>
         <p class="muted">Sono disponibili soltanto utenti abilitati e amministratori.</p>
+        <p id="owner-dialog-more" class="muted" hidden>Ci sono altri utenti: restringi la ricerca per trovarli.</p>
         <div class="dialog-actions">
           <button class="button" value="cancel">Annulla</button>
           <button id="confirm-owner" class="button primary" value="confirm">Assegna</button>

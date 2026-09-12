@@ -453,3 +453,93 @@ def test_the_pdf_inside_a_p7m_is_checked_too(client, auth_headers, mutation_head
     ).json()
 
     assert document["pdfa_status"] == "non_conformant"
+
+
+def test_the_listing_searches_by_file_name(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+    for name in ("Contratto affitto.pdf", "contratto-vendita.pdf", "fattura.xml"):
+        _upload(client, mutation_headers("owner"), name, b"<x/>", "application/xml")
+
+    found = client.get("/api/v1/documents?search=CONTRATTO", headers=auth_headers("owner")).json()
+
+    assert found["total"] == 2
+    assert sorted(item["original_name"] for item in found["items"]) == [
+        "Contratto affitto.pdf",
+        "contratto-vendita.pdf",
+    ]
+
+
+def test_the_total_follows_the_filter(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("owner"))
+    for index in range(5):
+        _upload(client, mutation_headers("owner"), f"nota-{index}.xml", b"<x/>", "application/xml")
+    _upload(client, mutation_headers("owner"), "altro.xml", b"<x/>", "application/xml")
+
+    page = client.get(
+        "/api/v1/documents?search=nota&limit=2&offset=2", headers=auth_headers("owner")
+    )
+
+    assert page.json()["total"] == 5
+    assert len(page.json()["items"]) == 2
+
+
+def test_an_admin_filters_the_listing_by_owner(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    admin = client.get("/api/v1/me", headers=auth_headers("admin")).json()
+    first = client.get("/api/v1/me", headers=auth_headers("uno")).json()
+    second = client.get("/api/v1/me", headers=auth_headers("due")).json()
+    for identity in (first, second):
+        _promote(client, mutation_headers("admin"), identity["id"])
+    _upload(client, mutation_headers("uno"), "di-uno.xml", b"<x/>", "application/xml")
+    _upload(client, mutation_headers("due"), "di-due.xml", b"<x/>", "application/xml")
+    _upload(client, mutation_headers("admin"), "dell-admin.xml", b"<x/>", "application/xml")
+
+    only_first = client.get(
+        f"/api/v1/documents?owner={first['id']}", headers=auth_headers("admin")
+    ).json()
+    both = client.get(
+        f"/api/v1/documents?owner={first['id']}&owner={second['id']}",
+        headers=auth_headers("admin"),
+    ).json()
+
+    assert [item["original_name"] for item in only_first["items"]] == ["di-uno.xml"]
+    assert sorted(item["original_name"] for item in both["items"]) == ["di-due.xml", "di-uno.xml"]
+    assert both["total"] == 2
+    assert admin["role"] == "admin"
+
+
+def test_an_ordinary_account_cannot_ask_for_someone_else(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    admin = client.get("/api/v1/me", headers=auth_headers("admin")).json()
+    user = client.get("/api/v1/me", headers=auth_headers("owner")).json()
+    _promote(client, mutation_headers("admin"), user["id"])
+
+    refused = client.get(f"/api/v1/documents?owner={admin['id']}", headers=auth_headers("owner"))
+
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "admin_required"
+
+
+def test_the_account_listing_searches_by_name_and_address(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    client.get("/api/v1/me", headers=auth_headers("rossi"))
+    client.get("/api/v1/me", headers=auth_headers("bianchi"))
+
+    found = client.get("/api/v1/admin/users?search=ross", headers=auth_headers("admin")).json()
+
+    assert found["total"] == 1
+    assert found["items"][0]["username"] == "rossi"
+
+
+def test_the_account_listing_can_be_narrowed_by_role(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+    """Choosing a new owner means choosing among the accounts allowed to hold one."""
+    client.get("/api/v1/me", headers=auth_headers("admin"))
+    rossi = client.get("/api/v1/me", headers=auth_headers("rossi")).json()
+    _promote(client, mutation_headers("admin"), rossi["id"])
+    # bianchi is left waiting for authorisation, so it cannot own anything
+    client.get("/api/v1/me", headers=auth_headers("bianchi"))
+
+    eligible = client.get(
+        "/api/v1/admin/users?role=user&role=admin", headers=auth_headers("admin")
+    ).json()
+
+    assert eligible["total"] == 2
+    assert {item["username"] for item in eligible["items"]} == {"admin", "rossi"}

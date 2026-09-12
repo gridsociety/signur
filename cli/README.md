@@ -41,11 +41,20 @@ signur signatures create DOCUMENT_ID --mode graphic \
 `--placement` è ripetibile. I suoi sei valori sono: versione dell'artefatto grafico, pagina,
 coordinata X, coordinata Y, larghezza e altezza.
 
+Gli elenchi sono paginati con `--limit` e `--offset` e si restringono con una ricerca:
+`documents list --search` filtra per nome del file, `users list --search` per nome, nome utente
+o email. Solo un amministratore può chiedere i documenti di qualcun altro, con `--owner`
+ripetibile:
+
+```shell
+signur documents list --search verbale --owner USER_ID --owner ALTRO_USER_ID
+```
+
 Gli amministratori possono elencare gli account e trasferire un documento a un Utente o
 Amministratore abilitato:
 
 ```shell
-signur users list
+signur users list --search rossi
 signur documents set-owner DOCUMENT_ID USER_ID
 ```
 

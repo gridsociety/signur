@@ -5,6 +5,7 @@ import subprocess
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import urlencode
 
 import click
 
@@ -197,10 +198,25 @@ def documents() -> None:
 @documents.command("list")
 @click.option("--limit", default=100, type=click.IntRange(1, 100))
 @click.option("--offset", default=0, type=click.IntRange(0))
+@click.option(
+    "--search", default=None, help="Keep only the documents whose file name contains this."
+)
+@click.option(
+    "--owner",
+    "owners",
+    multiple=True,
+    help="Keep only the documents of this account; repeatable, administrators only.",
+)
 @pass_context
-def documents_list(ctx: Context, limit: int, offset: int) -> None:
+def documents_list(
+    ctx: Context, limit: int, offset: int, search: str | None, owners: tuple[str, ...]
+) -> None:
     """List the visible documents, most recent first."""
-    emit(ctx, call(ctx, "GET", f"/documents?limit={limit}&offset={offset}"))
+    query = {"limit": str(limit), "offset": str(offset)}
+    if search:
+        query["search"] = search
+    parameters = [*query.items(), *(("owner", owner) for owner in owners)]
+    emit(ctx, call(ctx, "GET", f"/documents?{urlencode(parameters)}"))
 
 
 @documents.command("show")
@@ -550,10 +566,18 @@ def users() -> None:
 @users.command("list")
 @click.option("--limit", default=100, type=click.IntRange(1, 100))
 @click.option("--offset", default=0, type=click.IntRange(0))
+@click.option(
+    "--search",
+    default=None,
+    help="Keep only the accounts matching this name, user name or address.",
+)
 @pass_context
-def users_list(ctx: Context, limit: int, offset: int) -> None:
+def users_list(ctx: Context, limit: int, offset: int, search: str | None) -> None:
     """List the registered accounts and their role."""
-    emit(ctx, call(ctx, "GET", f"/admin/users?limit={limit}&offset={offset}"))
+    query = {"limit": str(limit), "offset": str(offset)}
+    if search:
+        query["search"] = search
+    emit(ctx, call(ctx, "GET", f"/admin/users?{urlencode(query)}"))
 
 
 @users.command("set-role")

@@ -26,7 +26,7 @@ let signingProxies = [];
 let graphicSignatures = [];
 let currentProfile = null;
 let allUsers = [];
-let eligibleOwners = [];
+let canTransferOwnership = false;
 let signingDocument = null;
 let ownerDocument = null;
 let placements = [];
@@ -48,6 +48,11 @@ let adminGraphics = [];
 let localDiscoveryToken = 0;
 let localLibraryDebounceTimer = null;
 const activeDocumentJobs = new Map();
+const PER_PAGE = 20;
+const documentFilters = { search: "", owners: [], offset: 0 };
+const userFilters = { search: "", offset: 0 };
+const ownerOptions = { term: "", items: [], total: 0, loading: false, active: -1 };
+let ownerOptionsToken = 0;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -59,6 +64,66 @@ async function api(path, options = {}) {
   }
   if (response.status === 204) return null;
   return response.json();
+}
+
+// Typing is a stream of keystrokes and each one would be a request, so the
+// listings only follow the last one of a burst.
+function debounce(action, delay = 250) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => action(...args), delay);
+  };
+}
+
+// 1 … 4 5 6 … 20: the current page keeps its neighbours, both ends stay one
+// click away, and what is skipped in between is written as a gap.
+function pageNumbers(current, last) {
+  const wanted = new Set([1, last, current - 1, current, current + 1]);
+  if (current <= 3) [2, 3, 4].forEach((page) => wanted.add(page));
+  if (current >= last - 2) [last - 1, last - 2, last - 3].forEach((page) => wanted.add(page));
+  const pages = [...wanted].filter((page) => page >= 1 && page <= last).sort((a, b) => a - b);
+  return pages.flatMap((page, index) => (index && page - pages[index - 1] > 1 ? ["…", page] : [page]));
+}
+
+function renderPager(container, { total, limit, offset, go }) {
+  container.replaceChildren();
+  const last = Math.max(1, Math.ceil(total / limit));
+  if (last === 1) return;
+  const current = Math.min(last, Math.floor(offset / limit) + 1);
+  const arrow = (symbol, target, description) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button page";
+    button.textContent = symbol;
+    button.setAttribute("aria-label", description);
+    button.disabled = target < 1 || target > last;
+    button.addEventListener("click", () => go((target - 1) * limit));
+    return button;
+  };
+  container.append(arrow("‹", current - 1, "Pagina precedente"));
+  for (const page of pageNumbers(current, last)) {
+    if (page === "…") {
+      const gap = document.createElement("span");
+      gap.className = "page-gap";
+      gap.textContent = "…";
+      gap.setAttribute("aria-hidden", "true");
+      container.append(gap);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button page";
+    button.textContent = String(page);
+    button.setAttribute("aria-label", `Pagina ${page}`);
+    if (page === current) {
+      button.classList.add("current");
+      button.setAttribute("aria-current", "page");
+    }
+    button.addEventListener("click", () => go((page - 1) * limit));
+    container.append(button);
+  }
+  container.append(arrow("›", current + 1, "Pagina successiva"));
 }
 
 function showNotice(message, kind = "success") {
@@ -82,9 +147,12 @@ function renderDocuments(items) {
   const container = document.querySelector("#documents");
   container.replaceChildren();
   if (!items.length) {
+    const filtering = Boolean(documentFilters.search || documentFilters.owners.length);
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "Non ci sono ancora documenti.";
+    empty.textContent = filtering
+      ? "Nessun documento corrisponde alla ricerca."
+      : "Non ci sono ancora documenti.";
     container.append(empty);
     return;
   }
@@ -152,10 +220,7 @@ function renderDocuments(items) {
       remove.addEventListener("click", () => deleteDocument(item));
       actions.append(remove);
     }
-    const hasOtherEligibleUser = eligibleOwners.some(
-      (candidate) => candidate.id !== currentProfile?.id,
-    );
-    if (currentProfile?.role === "admin" && hasOtherEligibleUser) {
+    if (canTransferOwnership) {
       const transfer = document.createElement("button");
       transfer.className = "button";
       transfer.textContent = "Cambia proprietario";
@@ -169,8 +234,31 @@ function renderDocuments(items) {
 }
 
 async function loadDocuments() {
-  const listing = await api("/api/v1/documents?limit=100&offset=0");
+  const params = new URLSearchParams({ limit: PER_PAGE, offset: documentFilters.offset });
+  if (documentFilters.search) params.set("search", documentFilters.search);
+  for (const owner of documentFilters.owners) params.append("owner", owner.id);
+  const listing = await api(`/api/v1/documents?${params}`);
+  // Deleting the last document of a page, or narrowing the search, would
+  // otherwise leave the reader looking at an empty page with content behind it.
+  if (!listing.items.length && listing.total && documentFilters.offset >= listing.total) {
+    documentFilters.offset = (Math.ceil(listing.total / PER_PAGE) - 1) * PER_PAGE;
+    await loadDocuments();
+    return;
+  }
   renderDocuments(listing.items);
+  renderPager(document.querySelector("#documents-pager"), {
+    total: listing.total,
+    limit: PER_PAGE,
+    offset: listing.offset,
+    go: (offset) => {
+      documentFilters.offset = offset;
+      refreshDocuments();
+    },
+  });
+}
+
+function refreshDocuments() {
+  loadDocuments().catch((error) => showNotice(error.message, "error"));
 }
 
 async function deleteDocument(item) {
@@ -184,9 +272,175 @@ async function deleteDocument(item) {
   }
 }
 
+// Only an administrator sees documents that are not their own, so only an
+// administrator is offered the filter that picks whose.
+function ownerCandidateQuery(extra) {
+  const params = new URLSearchParams({ limit: extra.limit, offset: extra.offset ?? 0 });
+  if (extra.search) params.set("search", extra.search);
+  for (const role of ["user", "admin"]) params.append("role", role);
+  return params;
+}
+
+function renderOwnerChips() {
+  const chips = document.querySelector("#owner-chips");
+  chips.replaceChildren();
+  for (const owner of documentFilters.owners) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.append(owner.display_name);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "chip-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Togli ${owner.display_name} dal filtro`);
+    remove.addEventListener("click", () => toggleOwnerFilter(owner));
+    chip.append(remove);
+    chips.append(chip);
+  }
+  document.querySelector("#owner-clear").hidden = documentFilters.owners.length === 0;
+  document.querySelector("#owner-search").placeholder = documentFilters.owners.length ? "" : "Tutti";
+}
+
+function renderOwnerOptions() {
+  const list = document.querySelector("#owner-options");
+  const input = document.querySelector("#owner-search");
+  list.replaceChildren();
+  if (!ownerOptions.items.length) {
+    const empty = document.createElement("li");
+    empty.className = "combobox-note";
+    empty.textContent = ownerOptions.loading ? "Ricerca in corso…" : "Nessun utente trovato.";
+    list.append(empty);
+    input.removeAttribute("aria-activedescendant");
+    return;
+  }
+  ownerOptions.items.forEach((user, index) => {
+    const option = document.createElement("li");
+    option.className = "combobox-option";
+    option.id = `owner-option-${index}`;
+    option.setAttribute("role", "option");
+    const chosen = documentFilters.owners.some((owner) => owner.id === user.id);
+    option.setAttribute("aria-selected", String(chosen));
+    option.classList.toggle("chosen", chosen);
+    option.classList.toggle("active", index === ownerOptions.active);
+    const name = document.createElement("strong");
+    name.textContent = user.display_name;
+    const detail = document.createElement("span");
+    detail.className = "muted";
+    detail.textContent = user.email || user.username;
+    option.append(name, detail);
+    // Choosing with the mouse must not take the focus away from the box, or it
+    // would close before the click lands.
+    option.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      toggleOwnerFilter(user);
+    });
+    list.append(option);
+  });
+  if (ownerOptions.loading || ownerOptions.items.length < ownerOptions.total) {
+    const more = document.createElement("li");
+    more.className = "combobox-note";
+    more.textContent = "Altri utenti in arrivo…";
+    list.append(more);
+  }
+  const active = ownerOptions.active >= 0 ? `owner-option-${ownerOptions.active}` : null;
+  if (active) input.setAttribute("aria-activedescendant", active);
+  else input.removeAttribute("aria-activedescendant");
+}
+
+async function loadOwnerOptions({ append = false } = {}) {
+  if (append && (ownerOptions.loading || ownerOptions.items.length >= ownerOptions.total)) return;
+  const token = ++ownerOptionsToken;
+  ownerOptions.loading = true;
+  const offset = append ? ownerOptions.items.length : 0;
+  try {
+    const listing = await api(
+      `/api/v1/admin/users?${ownerCandidateQuery({ limit: PER_PAGE, offset, search: ownerOptions.term })}`,
+    );
+    // A slower answer to an older search must not replace the newer one.
+    if (token !== ownerOptionsToken) return;
+    ownerOptions.items = append ? [...ownerOptions.items, ...listing.items] : listing.items;
+    ownerOptions.total = listing.total;
+  } catch (error) {
+    if (token === ownerOptionsToken) showNotice(error.message, "error");
+  } finally {
+    if (token === ownerOptionsToken) {
+      ownerOptions.loading = false;
+      renderOwnerOptions();
+    }
+  }
+}
+
+function openOwnerOptions() {
+  const list = document.querySelector("#owner-options");
+  if (!list.hidden) return;
+  list.hidden = false;
+  document.querySelector("#owner-search").setAttribute("aria-expanded", "true");
+  renderOwnerOptions();
+  loadOwnerOptions();
+}
+
+function closeOwnerOptions() {
+  ownerOptions.active = -1;
+  document.querySelector("#owner-options").hidden = true;
+  document.querySelector("#owner-search").setAttribute("aria-expanded", "false");
+}
+
+function moveOwnerHighlight(step) {
+  if (!ownerOptions.items.length) return;
+  const last = ownerOptions.items.length - 1;
+  const next = ownerOptions.active + step;
+  ownerOptions.active = next < 0 ? last : next > last ? 0 : next;
+  renderOwnerOptions();
+  document.querySelector(`#owner-option-${ownerOptions.active}`)?.scrollIntoView({ block: "nearest" });
+}
+
+function toggleOwnerFilter(user) {
+  const chosen = documentFilters.owners.findIndex((owner) => owner.id === user.id);
+  if (chosen >= 0) documentFilters.owners.splice(chosen, 1);
+  else documentFilters.owners.push({ id: user.id, display_name: user.display_name });
+  documentFilters.offset = 0;
+  renderOwnerChips();
+  renderOwnerOptions();
+  refreshDocuments();
+}
+
+function clearOwnerFilter() {
+  if (!documentFilters.owners.length) return;
+  documentFilters.owners = [];
+  documentFilters.offset = 0;
+  renderOwnerChips();
+  renderOwnerOptions();
+  refreshDocuments();
+}
+
+// The button that hands a document to somebody else is only worth showing when
+// there is somebody else: two candidates are enough to know.
+async function refreshOwnershipTools() {
+  const filter = document.querySelector("#owner-filter");
+  if (currentProfile?.role !== "admin") {
+    canTransferOwnership = false;
+    filter.hidden = true;
+    return;
+  }
+  filter.hidden = false;
+  try {
+    const listing = await api(`/api/v1/admin/users?${ownerCandidateQuery({ limit: 2 })}`);
+    canTransferOwnership = listing.items.some((user) => user.id !== currentProfile.id);
+  } catch {
+    canTransferOwnership = false;
+  }
+}
+
 function renderUsers() {
   const container = document.querySelector("#users");
   container.replaceChildren();
+  if (!allUsers.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = userFilters.search ? "Nessun utente corrisponde alla ricerca." : "Nessun utente.";
+    container.append(empty);
+    return;
+  }
   for (const user of allUsers) {
     const row = document.createElement("article");
     row.className = "user-row";
@@ -232,17 +486,29 @@ function renderUsers() {
 }
 
 async function loadUsers() {
-  const users = [];
-  let offset = 0;
-  while (true) {
-    const listing = await api(`/api/v1/admin/users?limit=100&offset=${offset}`);
-    users.push(...listing.items);
-    offset += listing.items.length;
-    if (!listing.items.length || offset >= listing.total) break;
+  const params = new URLSearchParams({ limit: PER_PAGE, offset: userFilters.offset });
+  if (userFilters.search) params.set("search", userFilters.search);
+  const listing = await api(`/api/v1/admin/users?${params}`);
+  if (!listing.items.length && listing.total && userFilters.offset >= listing.total) {
+    userFilters.offset = (Math.ceil(listing.total / PER_PAGE) - 1) * PER_PAGE;
+    await loadUsers();
+    return;
   }
-  allUsers = users;
-  eligibleOwners = users.filter((user) => user.role !== "no_access");
+  allUsers = listing.items;
   renderUsers();
+  renderPager(document.querySelector("#users-pager"), {
+    total: listing.total,
+    limit: PER_PAGE,
+    offset: listing.offset,
+    go: (offset) => {
+      userFilters.offset = offset;
+      refreshUsers();
+    },
+  });
+}
+
+function refreshUsers() {
+  loadUsers().catch((error) => showNotice(error.message, "error"));
 }
 
 async function saveUserRole(user, select, button) {
@@ -255,6 +521,9 @@ async function saveUserRole(user, select, button) {
     });
     showNotice(`Ruolo di ${user.display_name} aggiornato.`);
     await loadUsers();
+    // Revoking the last other account takes the transfer button away with it.
+    await refreshOwnershipTools();
+    refreshDocuments();
   } catch (error) {
     showNotice(error.message, "error");
     select.value = user.role;
@@ -798,19 +1067,34 @@ function handleJobUpdate(job) {
   }
 }
 
+async function loadOwnerCandidates() {
+  const select = document.querySelector("#owner-select");
+  const search = document.querySelector("#owner-dialog-search").value.trim();
+  select.replaceChildren();
+  try {
+    const listing = await api(`/api/v1/admin/users?${ownerCandidateQuery({ limit: 50, search })}`);
+    const candidates = listing.items.filter((user) => user.id !== ownerDocument?.owner_user_id);
+    for (const user of candidates) {
+      const option = document.createElement("option");
+      option.value = user.id;
+      option.textContent = `${user.display_name} (${roleLabels[user.role]})`;
+      select.append(option);
+    }
+    document.querySelector("#owner-dialog-more").hidden = listing.total <= listing.items.length;
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+  document.querySelector("#confirm-owner").disabled = select.options.length === 0;
+}
+
 function openOwnerDialog(item) {
   ownerDocument = item;
   document.querySelector("#owner-dialog-document").textContent = item.original_name;
-  const select = document.querySelector("#owner-select");
-  select.replaceChildren();
-  for (const user of eligibleOwners.filter((candidate) => candidate.id !== item.owner_user_id)) {
-    const option = document.createElement("option");
-    option.value = user.id;
-    option.textContent = `${user.display_name} (${roleLabels[user.role]})`;
-    select.append(option);
-  }
-  document.querySelector("#confirm-owner").disabled = select.options.length === 0;
+  document.querySelector("#owner-dialog-search").value = "";
+  document.querySelector("#owner-select").replaceChildren();
+  document.querySelector("#confirm-owner").disabled = true;
   document.querySelector("#owner-dialog").showModal();
+  loadOwnerCandidates();
 }
 
 async function changeSelectedOwner() {
@@ -1566,8 +1850,8 @@ async function start() {
       document.querySelector("#users-nav").hidden = false;
       document.querySelector("#graphics-nav").hidden = false;
       document.querySelector("#proxies-nav").hidden = false;
-      await loadUsers();
     }
+    await refreshOwnershipTools();
     await loadSigningResources();
     await loadDocuments();
     connectEvents();
@@ -1711,6 +1995,8 @@ document.querySelector("#create-user-form").addEventListener("submit", async (ev
     });
     form.reset();
     await loadUsers();
+    await refreshOwnershipTools();
+    refreshDocuments();
     showNotice("Utente creato.");
   } catch (error) {
     showNotice(error.message, "error");
@@ -1723,7 +2009,69 @@ document.querySelector("#file-input").addEventListener("change", (event) => {
   event.target.value = "";
 });
 document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => showPanel(button.dataset.panel)));
-document.querySelector("#refresh-users").addEventListener("click", () => loadUsers().catch((error) => showNotice(error.message, "error")));
+document.querySelector("#refresh-users").addEventListener("click", () => refreshUsers());
+
+const searchDocuments = debounce((term) => {
+  documentFilters.search = term;
+  documentFilters.offset = 0;
+  refreshDocuments();
+});
+document.querySelector("#documents-search").addEventListener("input", (event) => searchDocuments(event.target.value.trim()));
+
+const searchUsers = debounce((term) => {
+  userFilters.search = term;
+  userFilters.offset = 0;
+  refreshUsers();
+});
+document.querySelector("#users-search").addEventListener("input", (event) => searchUsers(event.target.value.trim()));
+
+const searchOwnerCandidates = debounce((term) => {
+  ownerOptions.term = term;
+  ownerOptions.active = -1;
+  loadOwnerOptions();
+});
+const ownerSearch = document.querySelector("#owner-search");
+ownerSearch.addEventListener("focus", () => openOwnerOptions());
+ownerSearch.addEventListener("input", (event) => {
+  openOwnerOptions();
+  searchOwnerCandidates(event.target.value.trim());
+});
+ownerSearch.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    openOwnerOptions();
+    moveOwnerHighlight(event.key === "ArrowDown" ? 1 : -1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const user = ownerOptions.items[ownerOptions.active];
+    if (user) toggleOwnerFilter(user);
+  } else if (event.key === "Escape") {
+    closeOwnerOptions();
+  } else if (event.key === "Backspace" && !event.target.value && documentFilters.owners.length) {
+    toggleOwnerFilter(documentFilters.owners[documentFilters.owners.length - 1]);
+  }
+});
+ownerSearch.addEventListener("blur", () => closeOwnerOptions());
+// The list is a page at a time: reaching its end asks for the next one.
+document.querySelector("#owner-options").addEventListener("scroll", (event) => {
+  const list = event.target;
+  if (list.scrollTop + list.clientHeight >= list.scrollHeight - 24) loadOwnerOptions({ append: true });
+});
+document.querySelector("#owner-clear").addEventListener("click", () => {
+  ownerSearch.value = "";
+  ownerOptions.term = "";
+  clearOwnerFilter();
+  loadOwnerOptions();
+  ownerSearch.focus();
+});
+
+const searchDialogOwners = debounce(() => loadOwnerCandidates());
+const ownerDialogSearch = document.querySelector("#owner-dialog-search");
+ownerDialogSearch.addEventListener("input", () => searchDialogOwners());
+// The field lives inside the dialog's form, where Enter would mean "assign".
+ownerDialogSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") event.preventDefault();
+});
 document.querySelector("#create-graphic-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;

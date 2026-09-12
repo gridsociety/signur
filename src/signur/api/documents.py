@@ -1,7 +1,7 @@
 import re
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -78,8 +78,18 @@ def list_documents(
     session: DbSession,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query(max_length=255)] = None,
+    owner: Annotated[list[uuid.UUID] | None, Query()] = None,
 ) -> DocumentList:
-    filters = [] if user.role is UserRole.ADMIN else [Document.owner_user_id == user.id]
+    filters: list[Any] = [] if user.role is UserRole.ADMIN else [Document.owner_user_id == user.id]
+    if owner:
+        # Everyone else already sees only their own documents, so asking for
+        # somebody else's is an administrative act.
+        if user.role is not UserRole.ADMIN:
+            raise ApiError(403, "admin_required", "Solo un amministratore può filtrare per autore.")
+        filters.append(Document.owner_user_id.in_(owner))
+    if search and search.strip():
+        filters.append(Document.original_name.ilike(f"%{search.strip()}%"))
     total = session.scalar(select(func.count(Document.id)).where(*filters)) or 0
     items = session.scalars(
         select(Document)

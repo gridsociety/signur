@@ -289,3 +289,46 @@ def test_an_explicit_token_wins_over_a_stored_session(monkeypatch):  # type: ign
 
     assert headers["Authorization"] == "Bearer secret"
     assert "Cookie" not in headers
+
+
+def test_document_listing_carries_the_search_and_every_owner(monkeypatch):  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+
+    def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update(method=method, path=path)
+        return {"items": [], "total": 0}
+
+    monkeypatch.setattr(Client, "request", request)
+    result = CliRunner().invoke(
+        root,
+        [
+            "--json",
+            "documents",
+            "list",
+            "--search",
+            "verbale 2024",
+            "--owner",
+            "first-user",
+            "--owner",
+            "second-user",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == (
+        "/documents?limit=100&offset=0&search=verbale+2024&owner=first-user&owner=second-user"
+    )
+
+
+def test_account_listing_carries_the_search(monkeypatch):  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+
+    def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update(method=method, path=path)
+        return {"items": [], "total": 0}
+
+    monkeypatch.setattr(Client, "request", request)
+    result = CliRunner().invoke(root, ["--json", "users", "list", "--search", "rossi@example.test"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/admin/users?limit=100&offset=0&search=rossi%40example.test"
