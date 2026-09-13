@@ -22,7 +22,6 @@ from signur.models import (
     XadesPackaging,
 )
 from signur.schemas import SignatureCreate, SignatureJobView, SigningIdentityView
-from signur.secret_box import SecretBoxError, seal_pin
 from signur.signature_service import PlacementSpec, enqueue_signature
 from signur.signing_proxy import ProxySigningError, SigningProxyClient
 
@@ -79,7 +78,6 @@ def create_signature(
     body: SignatureCreate,
     user: AccessUser,
     session: DbSession,
-    settings: Annotated[Settings, Depends(get_settings)],
 ) -> SignatureJobView:
     filters = [Document.id == document_id]
     if user.role is not UserRole.ADMIN:
@@ -139,7 +137,7 @@ def create_signature(
         for item in body.placements
     ]
     signing_proxy = None
-    signing_pin_ciphertext = None
+    signing_pin = None
     if body.mode is not SignatureMode.GRAPHIC:
         proxy_query = select(SigningProxy).where(SigningProxy.active.is_(True))
         if body.signing_proxy_id is not None:
@@ -153,12 +151,7 @@ def create_signature(
             if body.pin is None and not signing_proxy.pin_saved:
                 raise ApiError(422, "pin_required", "Inserisci il PIN della smart card.")
             if body.pin is not None:
-                try:
-                    signing_pin_ciphertext = seal_pin(
-                        body.pin.get_secret_value(), settings.pin_encryption_key
-                    )
-                except SecretBoxError as exc:
-                    raise ApiError(503, "pin_encryption_unavailable", str(exc)) from exc
+                signing_pin = body.pin.get_secret_value()
         elif body.pin is not None:
             raise ApiError(422, "pin_not_allowed", "Il PIN non è previsto per questo certificato.")
     job = enqueue_signature(
@@ -171,7 +164,7 @@ def create_signature(
         request_id=request.state.request_id,
         placements=placements,
         signing_proxy=signing_proxy,
-        signing_pin_ciphertext=signing_pin_ciphertext,
+        signing_pin=signing_pin,
     )
     return SignatureJobView.model_validate(job)
 

@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from fake_card import authentication_key_usage, signing_key_usage
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from signur.database import get_session
 from signur.local_pkcs11 import DiscoveredCertificate
@@ -201,15 +201,17 @@ def test_local_pkcs11_certificate_and_pin_lifecycle(
     )
     assert queued.status_code == 202, queued.text
     assert "pin" not in queued.json()
+    job_id = UUID(queued.json()["id"])
     session_generator = client.app.dependency_overrides[get_session]()
     session = next(session_generator)
     try:
-        job = session.scalar(
-            select(SignatureJob).where(SignatureJob.id == UUID(queued.json()["id"]))
-        )
+        job = session.scalar(select(SignatureJob).where(SignatureJob.id == job_id))
         assert job is not None
-        assert job.signing_pin_ciphertext is not None
-        assert b"654321" not in job.signing_pin_ciphertext
+        # Not encrypted somewhere, but nowhere at all: no column of the job
+        # holds the PIN, because it waits in memory for the worker instead.
+        stored = session.execute(text("select * from signature_jobs")).mappings().all()
+        assert stored, "il job deve esistere"
+        assert not any("654321" in str(value) for row in stored for value in row.values())
     finally:
         session_generator.close()
 

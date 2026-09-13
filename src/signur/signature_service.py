@@ -30,6 +30,7 @@ from signur.models import (
     XadesPackaging,
 )
 from signur.pades import PadesError, build_pades_b_b, verify_pades_b_b
+from signur.pin_vault import pin_vault
 from signur.proxy_security import validate_proxy_url
 from signur.secret_box import SecretBoxError, unseal_pin
 from signur.signing_proxy import (
@@ -39,6 +40,7 @@ from signur.signing_proxy import (
     SigningProxyClient,
 )
 from signur.storage import LocalBlobStorage
+from signur.work_signal import work_signal
 from signur.xades import XadesError, build_xades_b_b, verify_xades_b_b
 
 ACTIVE_JOB_STATUSES = (SignatureJobStatus.QUEUED, SignatureJobStatus.RUNNING)
@@ -66,7 +68,7 @@ def enqueue_signature(
     xades_packaging: XadesPackaging | None = None,
     placements: list[PlacementSpec] | None = None,
     signing_proxy: SigningProxy | None = None,
-    signing_pin_ciphertext: bytes | None = None,
+    signing_pin: str | None = None,
 ) -> SignatureJob:
     locked_document = session.scalar(
         select(Document).where(Document.id == document.id).with_for_update()
@@ -102,10 +104,13 @@ def enqueue_signature(
         request_id=request_id,
         signing_proxy=signing_proxy,
         signing_proxy_name=signing_proxy.name if signing_proxy is not None else None,
-        signing_pin_ciphertext=signing_pin_ciphertext,
     )
     session.add(job)
     session.flush()
+    if signing_pin is not None:
+        # The worker runs in this process: the PIN waits in memory for it, and
+        # never becomes a row somebody could read afterwards.
+        pin_vault.hold(job.id, signing_pin)
     for item in placements or []:
         session.add(
             Placement(
@@ -136,7 +141,42 @@ def enqueue_signature(
     )
     session.commit()
     session.refresh(job)
+    # The worker is in this process: it is told, not left to find out.
+    work_signal.notify()
     return job
+
+
+def release_orphaned_signatures(session: Session) -> int:
+    """Close the attempts a stopped service left in its hands.
+
+    A running attempt belongs to a process that is no longer there: nobody will
+    ever finish it, and while it stands the document refuses a new one. Called
+    once when the service starts, before the worker takes anything on, which is
+    also why Signur signs from a single process.
+    """
+    jobs = session.scalars(
+        select(SignatureJob).where(SignatureJob.status == SignatureJobStatus.RUNNING)
+    ).all()
+    for job in jobs:
+        job.status = SignatureJobStatus.FAILED
+        job.error_code = "signature_interrupted"
+        job.error_message = "Il servizio si è fermato durante la firma: riprova."
+        job.completed_at = datetime.now(UTC)
+        document = session.get(Document, job.document_id)
+        if document is not None and document.state is not DocumentState.SIGNED:
+            document.state = DocumentState.SIGNING_FAILED
+            document.version += 1
+        record_event(
+            session,
+            actor=job.operator,
+            action="signature.interrupted",
+            entity_type="signature_job",
+            entity_id=job.id,
+            request_id=job.request_id,
+            details={"document_id": str(job.document_id), "attempt_number": job.attempt_number},
+        )
+    session.commit()
+    return len(jobs)
 
 
 def claim_next_signature(session: Session) -> uuid.UUID | None:
@@ -217,19 +257,22 @@ def _acquire_signing_identity(
             and proxy.pkcs11_certificate_label
         ):
             raise ProxySigningError("La configurazione PKCS#11 locale è incompleta.")
-        ciphertext = job.signing_pin_ciphertext or proxy.saved_pin_ciphertext
-        if ciphertext is None:
-            raise LocalPkcs11SigningError(
-                "pkcs11_pin_required",
-                "Il PIN della smart card è richiesto.",
-            )
-        try:
-            pin = unseal_pin(ciphertext, settings.pin_encryption_key)
-        except SecretBoxError as exc:
-            raise LocalPkcs11SigningError(
-                "pkcs11_configuration_failed",
-                "Il PIN salvato non è utilizzabile: chiedi a un amministratore di sostituirlo.",
-            ) from exc
+        pin = pin_vault.take(job.id)
+        if pin is None:
+            if proxy.saved_pin_ciphertext is None:
+                # Typed for this signature alone, and gone: a restart, or too
+                # long in the queue. Asking again is the only honest answer.
+                raise LocalPkcs11SigningError(
+                    "pkcs11_pin_required",
+                    "Il PIN della smart card è richiesto: riprova inserendolo di nuovo.",
+                )
+            try:
+                pin = unseal_pin(proxy.saved_pin_ciphertext, settings.pin_encryption_key)
+            except SecretBoxError as exc:
+                raise LocalPkcs11SigningError(
+                    "pkcs11_configuration_failed",
+                    "Il PIN salvato non è utilizzabile: chiedi a un amministratore di sostituirlo.",
+                ) from exc
         signing_client = LocalPkcs11SigningClient(
             proxy.pkcs11_library_path,
             proxy.pkcs11_token_label,
@@ -259,7 +302,6 @@ def _acquire_signing_identity(
     identity_job.signing_key_bits = identity.key_bits
     identity_job.signing_not_valid_before = identity.certificate.not_valid_before_utc
     identity_job.signing_not_valid_after = identity.certificate.not_valid_after_utc
-    identity_job.signing_pin_ciphertext = None
     session.commit()
     return signing_client, identity, own_client
 
@@ -418,7 +460,6 @@ def process_claimed_signature(
             current_job.status = SignatureJobStatus.FAILED
             current_job.error_code = error_code
             current_job.error_message = error_message
-            current_job.signing_pin_ciphertext = None
             current_job.completed_at = datetime.now(UTC)
             if current_document is not None and current_document.state is not DocumentState.SIGNED:
                 current_document.state = DocumentState.SIGNING_FAILED
@@ -435,5 +476,7 @@ def process_claimed_signature(
             session.commit()
         return False
     finally:
+        # Whatever became of the attempt, the PIN it was given is done with.
+        pin_vault.discard(job_id)
         if own_client and signing_client is not None:
             signing_client.close()

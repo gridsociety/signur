@@ -70,3 +70,22 @@ def revoke_token(session: Session, token: str) -> None:
 
 def revoke_user_sessions(session: Session, user: User) -> None:
     session.execute(delete(UserSession).where(UserSession.user_id == user.id))
+
+
+def session_is_live(session: Session, token: str) -> bool:
+    """Whether a session is still usable, without recording that it was used.
+
+    A connection that stays open asks this over and over, so it must not write
+    anything; resolving the session outright would rewrite its last use every
+    time.
+    """
+    if not token:
+        return False
+    expires_at = session.scalar(
+        select(UserSession.expires_at).where(UserSession.token_hash == hash_token(token))
+    )
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at > datetime.now(UTC)

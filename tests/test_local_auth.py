@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.websockets import WebSocketDisconnect
 
 from signur.auth import ensure_bootstrap_admin
 from signur.config import Settings, get_settings
@@ -22,7 +23,7 @@ LOOPBACK = ("127.0.0.1", 40000)
 REMOTE = ("192.168.1.50", 40000)
 
 
-def _build(tmp_path: Path) -> tuple[object, Settings, object]:
+def _build(tmp_path: Path, **options: object) -> tuple[object, Settings, object]:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -40,6 +41,7 @@ def _build(tmp_path: Path) -> tuple[object, Settings, object]:
         database_url="sqlite+pysqlite:///:memory:",
         storage_root=tmp_path / "blobs",
         pin_encryption_key="test-pin-encryption-key-with-at-least-32-characters",
+        **options,
     )
     with factory() as session:
         ensure_bootstrap_admin(session, settings)
@@ -58,6 +60,15 @@ def _build(tmp_path: Path) -> tuple[object, Settings, object]:
 def local_client(tmp_path: Path) -> Generator[TestClient]:
     app, _settings, engine = _build(tmp_path)
     with TestClient(app, client=LOOPBACK, headers=ORIGIN) as client:
+        yield client
+    engine.dispose()
+
+
+@pytest.fixture
+def single_machine_client(tmp_path: Path) -> Generator[TestClient]:
+    """The install that configures nothing: no list of origins to compare against."""
+    app, _settings, engine = _build(tmp_path, allowed_origins=())
+    with TestClient(app, client=LOOPBACK) as client:
         yield client
     engine.dispose()
 
@@ -287,3 +298,92 @@ def test_admin_can_reset_a_password_and_that_ends_old_sessions(local_client: Tes
     )
     assert reset.status_code == 200
     assert laura.get("/api/v1/me").status_code == 401
+
+
+SAME_SITE = {"Origin": "http://testserver"}
+ANOTHER_SITE = {"Origin": "https://malizia.test"}
+
+
+def test_a_page_from_another_site_cannot_open_the_event_stream(
+    single_machine_client: TestClient,
+) -> None:
+    """Without a configured list, the only origin that makes sense is our own."""
+    with (
+        pytest.raises(WebSocketDisconnect) as refused,
+        single_machine_client.websocket_connect("/api/v1/events", headers=ANOTHER_SITE),
+    ):
+        pass
+
+    assert refused.value.code == 4403
+
+
+def test_the_interface_opens_the_event_stream_from_its_own_address(
+    single_machine_client: TestClient,
+) -> None:
+    with single_machine_client.websocket_connect("/api/v1/events", headers=SAME_SITE) as stream:
+        assert stream.receive_json()["type"] == "snapshot"
+
+
+def test_a_client_that_is_not_a_browser_opens_the_event_stream(
+    single_machine_client: TestClient,
+) -> None:
+    """A script carries no session of its own to be used against its owner."""
+    with single_machine_client.websocket_connect("/api/v1/events") as stream:
+        assert stream.receive_json()["type"] == "snapshot"
+
+
+def test_the_event_stream_ends_when_the_session_is_revoked(local_client: TestClient) -> None:
+    local_client.post(
+        "/api/v1/auth/password",
+        json={"current_password": "", "new_password": GOOD_PASSWORD},
+    )
+    with (
+        pytest.raises(WebSocketDisconnect) as closed,
+        local_client.websocket_connect("/api/v1/events", headers=ORIGIN) as stream,
+    ):
+        assert stream.receive_json()["type"] == "snapshot"
+        # Somewhere else, the account signs out of everything.
+        other = TestClient(local_client.app, client=LOOPBACK, headers=ORIGIN)
+        other.cookies.update(dict(local_client.cookies))
+        assert other.post("/api/v1/auth/logout").status_code == 204
+        stream.receive_json()
+
+    assert (closed.value.code, closed.value.reason) == (4401, "Sessione non più valida.")
+
+
+def test_the_first_run_admin_keeps_its_stream_without_a_session(
+    single_machine_client: TestClient,
+) -> None:
+    """Nobody has signed in yet: the stream must not close on itself."""
+    with single_machine_client.websocket_connect("/api/v1/events", headers=SAME_SITE) as stream:
+        assert stream.receive_json()["type"] == "snapshot"
+        single_machine_client.post(
+            "/api/v1/documents",
+            files={"file": ("prova.txt", b"contenuto", "text/plain")},
+            headers=ORIGIN,
+        )
+        assert stream.receive_json()["documents"][0]["state"] == "to_sign"
+
+
+def test_a_page_from_another_site_cannot_act_on_the_api(
+    single_machine_client: TestClient, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """The same rule as the event stream: a foreign page cannot use the session."""
+    monkeypatch.setattr(
+        "signur.main.get_settings", lambda: Settings(environment="test", allowed_origins=())
+    )
+
+    refused = single_machine_client.post(
+        "/api/v1/documents",
+        files={"file": ("prova.txt", b"contenuto", "text/plain")},
+        headers=ANOTHER_SITE,
+    )
+    accepted = single_machine_client.post(
+        "/api/v1/documents",
+        files={"file": ("prova.txt", b"contenuto", "text/plain")},
+        headers=SAME_SITE,
+    )
+
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "origin_forbidden"
+    assert accepted.status_code == 201, accepted.text

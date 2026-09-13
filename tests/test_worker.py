@@ -26,7 +26,9 @@ from signur.signature_service import enqueue_signature
 from signur.storage import LocalBlobStorage
 
 
-def _queued_job(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.UUID]:
+def _installation(
+    tmp_path: Path, **options: object
+) -> tuple[sessionmaker[Session], Settings]:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -34,7 +36,7 @@ def _queued_job(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.U
     )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
-    settings = Settings(environment="test", storage_root=tmp_path / "blobs")
+    settings = Settings(environment="test", storage_root=tmp_path / "blobs", **options)
     storage = LocalBlobStorage(settings.storage_root, settings.max_upload_bytes)
     stored = storage.store_bytes(b"documento")
     with factory.begin() as session:
@@ -66,40 +68,78 @@ def _queued_job(tmp_path: Path) -> tuple[sessionmaker[Session], Settings, uuid.U
                 analysis_warnings=[],
             )
         )
+    return factory, settings
+
+
+def _enqueue(factory: sessionmaker[Session]) -> uuid.UUID:
     with factory() as session:
         user = session.scalar(select(User))
         document = session.scalar(select(Document))
         assert user is not None and document is not None
-        job = enqueue_signature(
+        return enqueue_signature(
             session,
             document=document,
             operator=user,
             mode=SignatureMode.CADES,
             request_id=str(uuid.uuid4()),
-        )
-    return factory, settings, job.id
+        ).id
+
+
+def _settled(factory: sessionmaker[Session], job_id: uuid.UUID, within: float) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        with factory() as session:
+            if session.get_one(SignatureJob, job_id).status is not SignatureJobStatus.QUEUED:
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def _in_process(monkeypatch, settings: Settings, factory: sessionmaker[Session]) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("signur.config.get_settings", lambda: settings)
+    monkeypatch.setattr("signur.worker.get_settings", lambda: settings)
+    # The lifespan reads its own copy, and that is where the sweep interval
+    # the worker will wait on comes from.
+    monkeypatch.setattr("signur.main.get_settings", lambda: settings)
+    monkeypatch.setattr("signur.worker.SessionLocal", factory)
 
 
 def test_the_running_service_works_off_the_queue_it_accepts(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A stock installation is one command: the server must execute its own jobs."""
-    factory, settings, job_id = _queued_job(tmp_path)
-    monkeypatch.setattr("signur.config.get_settings", lambda: settings)
-    monkeypatch.setattr("signur.worker.get_settings", lambda: settings)
-    monkeypatch.setattr("signur.worker.SessionLocal", factory)
+    factory, settings = _installation(tmp_path)
+    job_id = _enqueue(factory)
+    _in_process(monkeypatch, settings, factory)
 
     from signur.main import create_app
 
     with TestClient(create_app()):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            with factory() as session:
-                job = session.get_one(SignatureJob, job_id)
-                if job.status is not SignatureJobStatus.QUEUED:
-                    break
-            time.sleep(0.05)
+        settled = _settled(factory, job_id, within=5)
 
     with factory() as session:
         job = session.get_one(SignatureJob, job_id)
 
     # It has no signing proxy reachable here, so it must fail rather than sit in the queue.
-    assert job.status is SignatureJobStatus.FAILED, "il servizio non ha preso in carico il job"
+    assert settled and job.status is SignatureJobStatus.FAILED, (
+        "il servizio non ha preso in carico il job"
+    )
+
+
+def test_a_signature_starts_when_it_is_queued_not_when_the_sweep_comes_round(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing polls: queueing a signature wakes the worker there and then."""
+    factory, settings = _installation(tmp_path, worker_poll_seconds=60)
+    _in_process(monkeypatch, settings, factory)
+
+    from signur.main import create_app
+
+    with TestClient(create_app()):
+        # The first attempt settles, so the worker has certainly emptied the
+        # queue and settled down to wait, with the sweep a minute away.
+        assert _settled(factory, _enqueue(factory), within=5)
+        time.sleep(0.3)
+
+        second = _enqueue(factory)
+        settled = _settled(factory, second, within=5)
+
+    assert settled, "la firma ha aspettato la spazzata invece di partire subito"

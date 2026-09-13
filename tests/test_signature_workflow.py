@@ -38,12 +38,14 @@ from signur.models import (
     XadesPackaging,
 )
 from signur.pades import verify_pades_b_b
+from signur.pin_vault import pin_vault
 from signur.secret_box import seal_pin
 from signur.signature_service import (
     PlacementSpec,
     claim_next_signature,
     enqueue_signature,
     process_claimed_signature,
+    release_orphaned_signatures,
 )
 from signur.signing_proxy import ProxySigningError, SigningIdentity
 from signur.storage import LocalBlobStorage
@@ -223,7 +225,7 @@ def test_any_signing_failure_is_retryable(tmp_path: Path):
     assert second.status is SignatureJobStatus.QUEUED
 
 
-def test_local_pkcs11_job_decrypts_pin_and_clears_ephemeral_copy(
+def test_local_pkcs11_job_takes_the_pin_from_memory_and_never_stores_it(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     factory, settings, user_id, document_id, _original = _setup(tmp_path)
@@ -266,7 +268,7 @@ def test_local_pkcs11_job_decrypts_pin_and_clears_ephemeral_copy(
             mode=SignatureMode.CADES,
             request_id=str(uuid.uuid4()),
             signing_proxy=certificate,
-            signing_pin_ciphertext=seal_pin("654321", settings.pin_encryption_key),
+            signing_pin="654321",
         )
         job_id = job.id
 
@@ -274,9 +276,8 @@ def test_local_pkcs11_job_decrypts_pin_and_clears_ephemeral_copy(
         assert claim_next_signature(session) == job_id
     with factory() as session:
         assert process_claimed_signature(session, settings, job_id) is True
-    with factory() as session:
-        completed = session.get_one(SignatureJob, job_id)
-        assert completed.signing_pin_ciphertext is None
+    # Used once and let go: a second attempt would have to ask again.
+    assert pin_vault.take(job_id) is None
     assert captured == {
         "library_path": "/middleware/pkcs11.so",
         "token_label": "Token stabile",
@@ -492,3 +493,185 @@ def test_xades_job_produces_a_signed_xml(tmp_path: Path) -> None:
         )
 
     verify_xades_b_b(result, original, XadesPackaging.ENVELOPING, card.identity)
+
+
+def test_a_signature_whose_pin_is_gone_asks_for_it_again(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The PIN lives in this process only: a restart leaves the job without one."""
+    factory, settings, user_id, document_id, _original = _setup(tmp_path)
+    monkeypatch.setattr("signur.signature_service.LocalPkcs11SigningClient", FakeSigningClient)
+    with factory() as session:
+        user = session.get_one(User, user_id)
+        document = session.get_one(Document, document_id)
+        certificate = SigningProxy(
+            name="Carta locale",
+            backend=CertificateBackend.LOCAL,
+            base_url=None,
+            pkcs11_library_path="/middleware/pkcs11.so",
+            pkcs11_token_label="Token stabile",
+            pkcs11_certificate_label="Certificato firma",
+            active=True,
+            version=1,
+            created_by=user,
+        )
+        job_id = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+            signing_proxy=certificate,
+            signing_pin="654321",
+        ).id
+
+    pin_vault.discard(job_id)
+
+    with factory() as session:
+        assert claim_next_signature(session) == job_id
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job_id) is False
+    with factory() as session:
+        failed = session.get_one(SignatureJob, job_id)
+        assert failed.status is SignatureJobStatus.FAILED
+        assert failed.error_code == "pkcs11_pin_required"
+
+
+def test_a_certificate_with_a_saved_pin_signs_without_anybody_typing_it(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    factory, settings, user_id, document_id, _original = _setup(tmp_path)
+    captured: dict[str, str | None] = {}
+
+    class FakeLocalSigningClient(FakeSigningClient):
+        def __init__(
+            self, library_path: str, token_label: str, certificate_label: str, pin: str | None
+        ) -> None:
+            super().__init__()
+            captured["pin"] = pin
+
+        def close(self) -> None:
+            captured["closed"] = "yes"
+
+    monkeypatch.setattr("signur.signature_service.LocalPkcs11SigningClient", FakeLocalSigningClient)
+    with factory() as session:
+        user = session.get_one(User, user_id)
+        document = session.get_one(Document, document_id)
+        certificate = SigningProxy(
+            name="Carta locale",
+            backend=CertificateBackend.LOCAL,
+            base_url=None,
+            pkcs11_library_path="/middleware/pkcs11.so",
+            pkcs11_token_label="Token stabile",
+            pkcs11_certificate_label="Certificato firma",
+            saved_pin_ciphertext=seal_pin("111111", settings.pin_encryption_key),
+            active=True,
+            version=1,
+            created_by=user,
+        )
+        job_id = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+            signing_proxy=certificate,
+        ).id
+
+    with factory() as session:
+        assert claim_next_signature(session) == job_id
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job_id) is True
+
+    assert captured["pin"] == "111111"
+
+
+def test_a_pin_does_not_linger_when_the_attempt_fails_before_the_card(tmp_path: Path) -> None:
+    """Whatever ends the attempt, the PIN it was given does not stay in memory."""
+    factory, settings, user_id, document_id, _original = _setup(tmp_path)
+    with factory() as session:
+        user = session.get_one(User, user_id)
+        document = session.get_one(Document, document_id)
+        certificate = SigningProxy(
+            name="Carta locale",
+            backend=CertificateBackend.LOCAL,
+            base_url=None,
+            pkcs11_library_path="/middleware/pkcs11.so",
+            pkcs11_token_label="Token stabile",
+            pkcs11_certificate_label="Certificato firma",
+            active=True,
+            version=1,
+            created_by=user,
+        )
+        job_id = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+            signing_proxy=certificate,
+            signing_pin="654321",
+        ).id
+        # The operator loses access while the job waits, so it never gets as far
+        # as opening the card.
+        user.role = UserRole.NO_ACCESS
+        session.commit()
+
+    with factory() as session:
+        assert claim_next_signature(session) == job_id
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job_id) is False
+
+    assert pin_vault.take(job_id) is None
+
+
+def test_an_attempt_left_behind_by_a_stopped_service_is_closed_at_startup(tmp_path: Path) -> None:
+    """A process that dies mid-signature must not block the document for ever."""
+    factory, _settings, user_id, document_id, _original = _setup(tmp_path)
+    with factory() as session:
+        user = session.get_one(User, user_id)
+        document = session.get_one(Document, document_id)
+        job_id = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+        ).id
+        # The worker took it and the process went away before finishing.
+        assert claim_next_signature(session) == job_id
+
+    with factory() as session:
+        assert release_orphaned_signatures(session) == 1
+
+    with factory() as session:
+        job = session.get_one(SignatureJob, job_id)
+        document = session.get_one(Document, document_id)
+        assert job.status is SignatureJobStatus.FAILED
+        assert job.error_code == "signature_interrupted"
+        assert job.completed_at is not None
+        assert document.state is DocumentState.SIGNING_FAILED
+        # Nothing is active any more, so the document accepts another attempt.
+        enqueue_signature(
+            session,
+            document=document,
+            operator=session.get_one(User, user_id),
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+        )
+
+
+def test_a_signature_still_waiting_in_the_queue_survives_the_startup_sweep(tmp_path: Path) -> None:
+    factory, _settings, user_id, document_id, _original = _setup(tmp_path)
+    with factory() as session:
+        job_id = enqueue_signature(
+            session,
+            document=session.get_one(Document, document_id),
+            operator=session.get_one(User, user_id),
+            mode=SignatureMode.CADES,
+            request_id=str(uuid.uuid4()),
+        ).id
+
+    with factory() as session:
+        assert release_orphaned_signatures(session) == 0
+
+    with factory() as session:
+        assert session.get_one(SignatureJob, job_id).status is SignatureJobStatus.QUEUED

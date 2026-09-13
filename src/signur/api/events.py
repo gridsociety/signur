@@ -6,10 +6,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
-from signur.auth import DbSession, resolve_connection_user
+from signur.auth import DbSession, connection_still_authenticated, resolve_connection_user
 from signur.config import Settings, get_settings
 from signur.errors import ApiError
 from signur.models import Document, SignatureJob, UserRole
+from signur.origins import origin_is_trusted
 
 router = APIRouter(tags=["events"])
 
@@ -79,11 +80,11 @@ async def events(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> None:
     client_ip = websocket.client.host if websocket.client else ""
-    origin = websocket.headers.get("origin", "").rstrip("/")
     if settings.trusted_gateway_ips and client_ip not in settings.trusted_gateway_ips:
         await websocket.close(code=4403, reason="Gateway non autorizzato.")
         return
-    if settings.allowed_origins and origin not in settings.allowed_origins:
+    origin = websocket.headers.get("origin", "")
+    if not origin_is_trusted(origin, websocket.headers.get("host", ""), settings):
         await websocket.close(code=4403, reason="Origine non consentita.")
         return
     try:
@@ -100,6 +101,9 @@ async def events(
     try:
         while True:
             session.refresh(user)
+            if not connection_still_authenticated(websocket, session, settings, user):
+                await websocket.close(code=4401, reason="Sessione non più valida.")
+                return
             if _access_revoked(user.role):
                 await websocket.close(code=4403, reason="Accesso revocato.")
                 return

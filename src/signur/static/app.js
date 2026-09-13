@@ -764,6 +764,7 @@ function updateSignMode() {
   const selectedCertificate = selectedCertificateConfig();
   const needsPin = !graphic && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin;
   document.querySelector("#signing-pin-field").hidden = !needsPin;
+  document.querySelector("#signing-pin-help").hidden = !needsPin;
   const identity = selectedProxyIdentity();
   renderSelectedSigner(identity);
   updateSignSummary();
@@ -1780,8 +1781,19 @@ function connectEvents() {
     const payload = JSON.parse(event.data);
     if (payload.type === "snapshot") handleRealtimeSnapshot(payload);
   });
-  eventSocket.addEventListener("close", () => {
+  eventSocket.addEventListener("close", (event) => {
     eventSocket = null;
+    // The server closed the door: knocking every three seconds would only hide
+    // the reason. A session that ended elsewhere sends the reader back to the
+    // login, anything else refused says so and stops.
+    if (event.code === 4401 && authMode === "local") {
+      showLogin("La sessione non è più valida. Entra di nuovo.");
+      return;
+    }
+    if (event.code === 4401 || event.code === 4403) {
+      showNotice("Il collegamento in tempo reale è stato interrotto. Ricarica la pagina.", "error");
+      return;
+    }
     reconnectTimer = setTimeout(connectEvents, 3000);
   });
   eventSocket.addEventListener("error", () => eventSocket?.close());

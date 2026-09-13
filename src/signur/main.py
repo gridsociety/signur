@@ -14,6 +14,7 @@ from signur.api import admin, auth, documents, events, graphics, me, proxies, si
 from signur.config import get_settings
 from signur.errors import ApiError, ErrorBody, ErrorResponse, api_error_handler
 from signur.migrate import upgrade_to_head
+from signur.origins import origin_is_trusted
 from signur.schemas import HealthView
 from signur.worker import running_worker
 
@@ -78,15 +79,13 @@ def create_app() -> FastAPI:
                 request,
                 ApiError(403, "gateway_forbidden", "Gateway non autorizzato."),
             )
-        elif request.method not in {"GET", "HEAD", "OPTIONS"} and settings.allowed_origins:
-            origin = request.headers.get("origin", "").rstrip("/")
-            if origin not in settings.allowed_origins:
-                response = api_error_handler(
-                    request,
-                    ApiError(403, "origin_forbidden", "Origine della richiesta non consentita."),
-                )
-            else:
-                response = await call_next(request)
+        elif request.method not in {"GET", "HEAD", "OPTIONS"} and not origin_is_trusted(
+            request.headers.get("origin", ""), request.headers.get("host", ""), settings
+        ):
+            response = api_error_handler(
+                request,
+                ApiError(403, "origin_forbidden", "Origine della richiesta non consentita."),
+            )
         else:
             response = await call_next(request)
         response.headers["X-Request-Id"] = request.state.request_id

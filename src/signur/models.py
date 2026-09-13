@@ -278,7 +278,6 @@ class SignatureJob(Base):
     )
     signing_proxy: Mapped[SigningProxy | None] = relationship()
     signing_proxy_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    signing_pin_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     attempt_number: Mapped[int] = mapped_column(Integer)
     mode: Mapped[SignatureMode] = mapped_column(Enum(SignatureMode, native_enum=False))
     cades_strategy: Mapped[CadesStrategy | None] = mapped_column(

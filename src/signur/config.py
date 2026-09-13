@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     signing_proxy_url: str = "http://127.0.0.1:9021"
     signing_proxy_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     pin_encryption_key: SecretStr = SecretStr("")
-    worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    # Whoever queues a signature wakes the worker, so this is only how often
+    # the queue is swept anyway, in case that word never arrived.
+    worker_poll_seconds: float = Field(default=30.0, gt=0, le=3600)
     identity_uid_header: str = "X-Auth-Uid"
     identity_username_header: str = "X-Auth-Username"
     identity_name_header: str = "X-Auth-Name"

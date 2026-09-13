@@ -104,11 +104,14 @@ Percorsi tipici dei middleware:
 | Linux | `/usr/lib/x86_64-linux-gnu/<fornitore>.so` |
 
 Il PIN della carta può essere richiesto a ogni firma oppure salvato sul
-certificato. In entrambi i casi finisce nel database, perché la firma la esegue
-un worker asincrono: anche il PIN digitato per una singola firma resta nel job
-finché non viene consumato.
+certificato. Il PIN digitato per una singola firma **non viene mai scritto**:
+la firma la esegue lo stesso processo che serve l'interfaccia, quindi il PIN
+resta in memoria fino a quando quella firma lo usa, e poi sparisce. Se il
+servizio viene riavviato mentre una firma è ancora in coda, il PIN se ne va con
+il processo: il tentativo fallisce chiedendo di reinserirlo. Solo il PIN
+*salvato* su un certificato finisce nel database.
 
-Per impostazione predefinita quel PIN è **conservato in chiaro**, e
+Per impostazione predefinita quel PIN salvato è **conservato in chiaro**, e
 l'interfaccia lo dice esplicitamente quando stai per salvarlo. Per cifrarlo
 imposta un segreto dedicato di almeno 32 caratteri:
 
@@ -164,6 +167,16 @@ dei dati.
 | `SIGNUR_AUTO_MIGRATE` | `true` | Applica le migrazioni all'avvio |
 | `SIGNUR_MAX_UPLOAD_BYTES` | `33554432` | Dimensione massima dei caricamenti |
 | `SIGNUR_PIN_ENCRYPTION_KEY` | vuoto | Cifra i PIN delle smart card; senza, vengono salvati in chiaro |
+| `SIGNUR_ALLOWED_ORIGINS` | vuoto | Da quali indirizzi un browser può usare Signur; senza, vale solo l'indirizzo a cui Signur risponde |
+
+Su quell'ultima: un browser allega il cookie di sessione a qualunque richiesta
+parta da una pagina, e un WebSocket non è protetto dalla same-origin policy come
+lo è una fetch. Quando `SIGNUR_ALLOWED_ORIGINS` non è impostata, Signur accetta
+soltanto richieste che dichiarano l'indirizzo con cui è stata raggiunta — una
+pagina di un altro sito viene rifiutata — e quelle che non dichiarano alcuna
+origine, che non arrivano da un browser e quindi non hanno una sessione altrui
+da sfruttare. Dietro un proxy che riscrive l'intestazione `Host`, imposta la
+variabile con gli indirizzi pubblici.
 
 Per usare PostgreSQL al posto di SQLite:
 
@@ -216,8 +229,11 @@ uv sync --extra dev
 uv run signur
 ```
 
-Il worker che esegue le firme gira nello stesso processo del server, in un
-thread separato: le firme non bloccano l'interfaccia.
+Le firme girano nello stesso processo del server, in un thread dedicato: non
+c'è un servizio separato da avviare e non bloccano l'interfaccia. Chi accoda
+una firma avvisa direttamente quel thread, che parte subito invece di
+interrogare il database a intervalli; `SIGNUR_WORKER_POLL_SECONDS` resta come
+rete di sicurezza, cioè ogni quanto la coda viene comunque riguardata.
 
 Verifiche:
 
@@ -231,11 +247,16 @@ uv run mypy src
 
 Un'applicazione FastAPI serve sia l'API sia l'interfaccia web. Documenti, job di
 firma e audit stanno nel database; i file veri e propri stanno in una cartella
-privata fuori dalla radice web. Un worker prende i job in coda, costruisce il
-PDF, il CMS o l'XML e chiede alla carta l'unica primitiva crittografica che
-serve. Un WebSocket aggiorna documenti e tentativi senza ricaricare la pagina.
+privata fuori dalla radice web. Un thread dello stesso processo prende i job in
+coda, costruisce il PDF, il CMS o l'XML e chiede alla carta l'unica primitiva
+crittografica che serve; il PIN di quella singola firma non lascia mai la
+memoria del processo. Un WebSocket aggiorna documenti e tentativi senza
+ricaricare la pagina.
 
 I tentativi di firma non vengono mai ripetuti automaticamente: qualsiasi errore
 porta il documento in **Firma fallita** e lascia all'utente l'azione
 **Riprova**, così una carta non firma mai due volte senza una decisione
-esplicita.
+esplicita. Vale anche per un arresto a metà: all'avvio un tentativo rimasto in
+corso viene chiuso come fallito, perché appartiene a un processo che non c'è
+più, e il documento torna disponibile per un nuovo tentativo invece di restare
+bloccato.

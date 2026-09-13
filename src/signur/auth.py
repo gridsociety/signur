@@ -15,7 +15,7 @@ from signur.config import Settings, get_settings
 from signur.database import get_session
 from signur.errors import ApiError
 from signur.models import BootstrapState, User, UserRole
-from signur.sessions import resolve_session
+from signur.sessions import resolve_session, session_is_live
 
 
 @dataclass(frozen=True)
@@ -193,6 +193,27 @@ def resolve_connection_user(
         return resolve_local_user(connection, session, settings)
     identity = read_forward_identity(connection, settings)
     return resolve_user(session, identity, settings, request_id)
+
+
+def connection_still_authenticated(
+    connection: HTTPConnection, session: Session, settings: Settings, user: User
+) -> bool:
+    """Is the identity behind a long-lived connection still good?
+
+    A WebSocket is authenticated once, when it is opened, and then stays there
+    for hours. Signing out, changing a password or having one reset takes the
+    session away, and the connection must go with it.
+    """
+    if not settings.local_auth:
+        # The gateway authenticates every message it forwards; nothing here to
+        # outlive it.
+        return True
+    token = connection.cookies.get(settings.session_cookie_name, "")
+    if token:
+        return session_is_live(session, token)
+    # No session at all: only the untouched first run admin gets that far, and
+    # only from this machine. Setting a password ends it.
+    return not user.password_hash and is_loopback_request(connection)
 
 
 def get_current_user(
