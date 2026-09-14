@@ -232,7 +232,7 @@ def test_pades_is_available_without_a_graphic(client, auth_headers, mutation_hea
     assert response.json()["mode"] == "pades"
 
 
-def test_pades_takes_one_placement_but_refuses_two(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
+def test_pades_accepts_multiple_placements(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]
     client.get("/api/v1/me", headers=auth_headers("admin"))
     graphic = _create(client, mutation_headers("admin"), name="Firma PAdES").json()
     version_id = graphic["versions"][0]["id"]
@@ -243,14 +243,7 @@ def test_pades_takes_one_placement_but_refuses_two(client, auth_headers, mutatio
     )
     document_id = uploaded.json()["id"]
 
-    accepted = client.post(
-        f"/api/v1/documents/{document_id}/signatures",
-        headers=mutation_headers("admin"),
-        json={"mode": "pades", "placements": [_placement(version_id, 0)]},
-    )
-    assert accepted.status_code == 202, accepted.text
-
-    refused = client.post(
+    multiple = client.post(
         f"/api/v1/documents/{document_id}/signatures",
         headers=mutation_headers("admin"),
         json={
@@ -258,7 +251,8 @@ def test_pades_takes_one_placement_but_refuses_two(client, auth_headers, mutatio
             "placements": [_placement(version_id, 0), _placement(version_id, 1)],
         },
     )
-    assert refused.status_code == 422, refused.text
+    assert multiple.status_code == 202, multiple.text
+    assert [item["layer_order"] for item in multiple.json()["placements"]] == [0, 1]
 
 
 def test_a_refused_plan_answers_with_a_readable_422(client, auth_headers, mutation_headers):  # type: ignore[no-untyped-def]

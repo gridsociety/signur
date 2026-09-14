@@ -14,8 +14,9 @@ alla carta di firmarla tramite PKCS#11 e costruisce da sé il documento firmato.
 
 - **Qualsiasi formato in ingresso.** Carica quello che vuoi: Signur sceglie il
   contenitore di firma adatto al contenuto e lascia intatto il file originale.
-- **Firme grafiche sui PDF.** Trascina e ridimensiona un PNG sulla
-  pagina, con zoom fino al 300%. L'anteprima usa una copia locale di Mozilla
+- **Firme grafiche sui PDF.** Trascina e ridimensiona uno o più PNG sulle
+  pagine, con zoom fino al 300%. In modalità PAdES ogni posizione genera una
+  firma crittografica distinta. L'anteprima usa una copia locale di Mozilla
   PDF.js: non serve una CDN né il visualizzatore PDF del browser.
 - **Documenti già firmati.** Per i P7M attached il contenuto viene estratto ai
   soli fini dell'anteprima. Rifirmando un P7M puoi scegliere la strategia

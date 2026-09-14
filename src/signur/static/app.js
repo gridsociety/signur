@@ -767,9 +767,6 @@ function updateSignMode() {
   if (!catalogueReady || !pades) padesGraphicBox.checked = false;
   padesGraphicBox.disabled = !catalogueReady;
   document.querySelector("#pades-graphic-field").hidden = !pades;
-  const padesNote = document.querySelector("#pades-graphic-note");
-  padesNote.hidden = !pades || catalogueReady;
-  padesNote.textContent = "Nessuna firma grafica nel catalogo: la firma PAdES resta disponibile, ma senza immagine visibile.";
   document.querySelector("#cades-strategy-field").hidden = mode !== "cades" || !cmsInput;
   document.querySelector("#xades-packaging-field").hidden = mode !== "xades";
   document.querySelector("#proxy-field").hidden = graphic;
@@ -780,7 +777,6 @@ function updateSignMode() {
   document.querySelector("#signing-pin-help").hidden = !needsPin;
   const identity = selectedProxyIdentity();
   renderSelectedSigner(identity);
-  updatePlacementControls();
   updateSignSummary();
 }
 
@@ -792,16 +788,6 @@ function changeSignatureMode() {
   updateSignMode();
 }
 
-function updatePlacementControls() {
-  const padesLimitReached = document.querySelector("#signature-mode").value === "pades"
-    && placements.length >= 1;
-  const addButton = document.querySelector("#add-placement");
-  addButton.disabled = padesLimitReached;
-  addButton.title = padesLimitReached
-    ? "La firma PAdES ammette una sola immagine."
-    : "";
-}
-
 function updateSignSummary() {
   const mode = document.querySelector("#signature-mode").value;
   const summary = document.querySelector("#sign-summary");
@@ -809,6 +795,19 @@ function updateSignSummary() {
   pdfaHolder.replaceChildren();
   const pdfaNote = pdfaWarning(signingDocument);
   if (pdfaNote) pdfaHolder.append(pdfaNote);
+  const padesNote = document.querySelector("#pades-graphic-note");
+  const padesGraphic = mode === "pades" && document.querySelector("#pades-graphic").checked;
+  if (mode === "pades" && graphicSignatures.length === 0) {
+    padesNote.hidden = false;
+    padesNote.className = "muted";
+    padesNote.textContent = "Nessuna firma grafica nel catalogo: la firma PAdES resta disponibile, ma senza immagine visibile.";
+  } else if (padesGraphic && placements.length > 1) {
+    padesNote.hidden = false;
+    padesNote.className = "pdfa-note";
+    padesNote.textContent = `Hai aggiunto ${placements.length} firme grafiche: verranno generate ${placements.length} firme crittografiche separate sullo stesso PDF.`;
+  } else {
+    padesNote.hidden = true;
+  }
   if (mode === "graphic") {
     summary.textContent = placements.length ? `${placements.length} posizione/i configurata/e. Questa modalità applica soltanto l'immagine, senza firma digitale.` : "Aggiungi almeno una posizione per continuare.";
   } else if (mode === "xades") {
@@ -820,13 +819,17 @@ function updateSignSummary() {
     summary.textContent = identity ? `Conferma: il file verrà firmato in formato XAdES${shape} da ${identity.display_name}.` : "Seleziona un certificato disponibile.";
   } else if (mode === "pades") {
     const identity = selectedProxyIdentity();
-    const wantsGraphic = document.querySelector("#pades-graphic").checked;
+    const wantsGraphic = padesGraphic;
     if (!identity) {
       summary.textContent = "Seleziona un certificato disponibile.";
-    } else if (wantsGraphic && placements.length !== 1) {
-      summary.textContent = "Posiziona una sola immagine: diventerà l'aspetto della firma, quello che si apre cliccandola nel lettore PDF.";
+    } else if (wantsGraphic && placements.length === 0) {
+      summary.textContent = "Aggiungi almeno una firma grafica per continuare.";
     } else {
-      const appearance = wantsGraphic ? " con l'immagine scelta come aspetto della firma" : " senza immagine visibile";
+      const appearance = !wantsGraphic
+        ? " senza immagine visibile"
+        : placements.length === 1
+          ? " con una firma grafica visibile"
+          : ` con ${placements.length} firme grafiche e altrettante firme crittografiche`;
       summary.textContent = `Conferma: il PDF verrà firmato in formato PAdES${appearance} da ${identity.display_name}.`;
     }
   } else {
@@ -907,7 +910,6 @@ function renderPlacements() {
     list.append(item);
   });
   document.querySelector("#remove-placement").disabled = !selectedPlacementId;
-  updatePlacementControls();
   renderPlacementLayer();
   updateSignSummary();
 }
@@ -1017,8 +1019,8 @@ async function submitSignature(event) {
     showSignError("Aggiungi e posiziona almeno una firma sul documento.");
     return;
   }
-  if (padesGraphic && placements.length !== 1) {
-    showSignError("La firma PAdES ammette una sola immagine: è l'aspetto della firma.");
+  if (padesGraphic && placements.length === 0) {
+    showSignError("Aggiungi e posiziona almeno una firma grafica sul documento.");
     return;
   }
   const apiPlacements = placements.map(({ _clientId, ...placement }) => placement);

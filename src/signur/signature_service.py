@@ -359,9 +359,17 @@ def process_claimed_signature(
                 else:
                     filename = f"{job.document.original_name}.p7m"
             elif job.mode is SignatureMode.PADES:
-                placement = _load_placement(storage, job.placements[0]) if job.placements else None
-                result = build_pades_b_b(original, card, identity, placement)
-                verify_pades_b_b(result, original)
+                ordered_placements = sorted(job.placements, key=lambda item: item.layer_order)
+                if ordered_placements:
+                    result = original
+                    for item in ordered_placements:
+                        previous_revision = result
+                        placement = _load_placement(storage, item)
+                        result = build_pades_b_b(previous_revision, card, identity, placement)
+                        verify_pades_b_b(result, previous_revision)
+                else:
+                    result = build_pades_b_b(original, card, identity)
+                    verify_pades_b_b(result, original)
                 media_type = "application/pdf"
                 stem = job.document.original_name.removesuffix(".pdf")
                 filename = f"{stem}-firmato.pdf"

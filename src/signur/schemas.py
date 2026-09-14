@@ -208,10 +208,6 @@ class SignatureCreate(BaseModel):
             raise ValueError("La firma grafica richiede almeno un posizionamento.")
         if self.mode in {SignatureMode.CADES, SignatureMode.XADES} and self.placements:
             raise ValueError("Questa modalità non ammette posizionamenti grafici.")
-        if self.mode is SignatureMode.PADES and len(self.placements) > 1:
-            raise ValueError(
-                "La firma PAdES ammette una sola immagine, che diventa l'aspetto della firma."
-            )
         if self.cades_strategy is not None and self.mode is not SignatureMode.CADES:
             raise ValueError("La strategia CAdES è valida soltanto per la modalità CAdES.")
         if self.xades_packaging is not None and self.mode is not SignatureMode.XADES:

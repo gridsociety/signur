@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 from cryptography.x509.oid import NameOID
 from PIL import Image
 from pyhanko.pdf_utils import generic
+from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.pdf_utils.writer import PageObject, PdfFileWriter
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -75,6 +76,7 @@ class FakeSigningClient:
             signature_length=256,
         )
         self.fail = fail
+        self.signature_count = 0
 
     def get_identity(self) -> SigningIdentity:
         return self.identity
@@ -82,6 +84,7 @@ class FakeSigningClient:
     def sign_digest(self, digest: bytes, _expected: SigningIdentity) -> bytes:
         if self.fail:
             raise ProxySigningError("synthetic proxy failure")
+        self.signature_count += 1
         return self.key.sign(digest, padding.PKCS1v15(), utils.Prehashed(hashes.SHA256()))
 
 
@@ -428,6 +431,49 @@ def test_pades_job_signs_the_pdf_with_the_chosen_graphic(tmp_path: Path) -> None
         result = storage.path_for(artifact.blob.storage_key).read_bytes()
 
     verify_pades_b_b(result, original)
+
+
+def test_pades_job_creates_one_cryptographic_signature_per_placement(tmp_path: Path) -> None:
+    factory, settings, storage, original = _pdf_setup(tmp_path)
+
+    with factory() as session:
+        user = session.scalar(select(User).where(User.external_id == "graphic-operator"))
+        document = session.scalar(select(Document))
+        version = session.scalar(select(GraphicSignatureVersion))
+        assert user is not None and document is not None and version is not None
+        job = enqueue_signature(
+            session,
+            document=document,
+            operator=user,
+            mode=SignatureMode.PADES,
+            request_id=str(uuid.uuid4()),
+            # Deliberately enqueue these backwards: layer order defines signing order.
+            placements=[
+                PlacementSpec(version, 1, 0.55, 0.7, 0.25, 0.12, 1),
+                PlacementSpec(version, 1, 0.1, 0.7, 0.25, 0.12, 0),
+            ],
+        )
+
+    with factory() as session:
+        assert claim_next_signature(session) == job.id
+    signing_client = FakeSigningClient()
+    with factory() as session:
+        assert process_claimed_signature(session, settings, job.id, signing_client) is True
+
+    with factory() as session:
+        completed = session.get_one(SignatureJob, job.id)
+        artifact = session.scalar(select(SignedArtifact))
+        assert completed.status is SignatureJobStatus.COMPLETED
+        assert artifact is not None
+        result = storage.path_for(artifact.blob.storage_key).read_bytes()
+
+    reader = PdfFileReader(io.BytesIO(result), strict=True)
+    signatures = reader.embedded_signatures
+    assert signing_client.signature_count == 2
+    assert len(signatures) == 2
+    assert [float(value) for value in signatures[0].sig_field["/Rect"]] == [20, 54, 70, 90]
+    assert [float(value) for value in signatures[1].sig_field["/Rect"]] == [110, 54, 160, 90]
+    assert result.startswith(original)
 
 
 def test_pades_on_a_file_that_is_not_a_pdf_explains_itself(tmp_path: Path) -> None:

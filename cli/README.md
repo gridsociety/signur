@@ -39,7 +39,8 @@ signur signatures create DOCUMENT_ID --mode graphic \
 ```
 
 `--placement` è ripetibile. I suoi sei valori sono: versione dell'artefatto grafico, pagina,
-coordinata X, coordinata Y, larghezza e altezza.
+coordinata X, coordinata Y, larghezza e altezza. In modalità PAdES ogni `--placement`
+produce una firma crittografica distinta sullo stesso PDF.
 
 Gli elenchi sono paginati con `--limit` e `--offset` e si restringono con una ricerca:
 `documents list --search` filtra per nome del file, `users list --search` per nome, nome utente

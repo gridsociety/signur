@@ -80,7 +80,7 @@ def test_home_assets_are_public_but_do_not_contain_protected_data(client):  # ty
     assert "initial.width * constrainedScale" in script.text
     assert "initial.height * constrainedScale" in script.text
     assert "showSignError" in script.text
-    assert "padesLimitReached" in script.text
+    assert "firme crittografiche separate" in script.text
     assert 'id="sign-error"' in home.text
     assert client.get("/static/pdf-preview.js").status_code == 200
     assert client.get("/static/vendor/pdfjs/LICENSE").status_code == 200
