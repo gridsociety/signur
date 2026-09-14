@@ -133,6 +133,18 @@ function showNotice(message, kind = "success") {
   notice.hidden = false;
 }
 
+function showSignError(message) {
+  const error = document.querySelector("#sign-error");
+  error.textContent = message;
+  error.hidden = false;
+}
+
+function clearSignError() {
+  const error = document.querySelector("#sign-error");
+  error.textContent = "";
+  error.hidden = true;
+}
+
 function formatDate(value) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("it-IT", { dateStyle: "medium" }).format(new Date(value));
@@ -652,6 +664,7 @@ function openSignDialog(item) {
   activeJobId = null;
   placements = [];
   selectedPlacementId = null;
+  clearSignError();
   clearTimeout(jobPollTimer);
   document.querySelector("#dialog-document").textContent = item.original_name;
   document.querySelector("#sign-config").hidden = false;
@@ -767,14 +780,26 @@ function updateSignMode() {
   document.querySelector("#signing-pin-help").hidden = !needsPin;
   const identity = selectedProxyIdentity();
   renderSelectedSigner(identity);
+  updatePlacementControls();
   updateSignSummary();
 }
 
 function changeSignatureMode() {
   placements = [];
   selectedPlacementId = null;
+  clearSignError();
   renderPlacements();
   updateSignMode();
+}
+
+function updatePlacementControls() {
+  const padesLimitReached = document.querySelector("#signature-mode").value === "pades"
+    && placements.length >= 1;
+  const addButton = document.querySelector("#add-placement");
+  addButton.disabled = padesLimitReached;
+  addButton.title = padesLimitReached
+    ? "La firma PAdES ammette una sola immagine."
+    : "";
 }
 
 function updateSignSummary() {
@@ -824,9 +849,7 @@ function findGraphicVersion(versionId) {
 
 async function addPlacement() {
   try {
-    if (document.querySelector("#signature-mode").value === "pades" && placements.length >= 1) {
-      throw new Error("La firma PAdES ammette una sola immagine. Rimuovi quella presente per spostarla.");
-    }
+    clearSignError();
     const versionId = document.querySelector("#graphic-signature").value;
     const selected = findGraphicVersion(versionId);
     const preview = await pdfPreviewPromise;
@@ -850,7 +873,7 @@ async function addPlacement() {
     selectedPlacementId = placement._clientId;
     renderPlacements();
   } catch (error) {
-    showNotice(error.message, "error");
+    showSignError(error.message);
   }
 }
 
@@ -884,6 +907,7 @@ function renderPlacements() {
     list.append(item);
   });
   document.querySelector("#remove-placement").disabled = !selectedPlacementId;
+  updatePlacementControls();
   renderPlacementLayer();
   updateSignSummary();
 }
@@ -986,14 +1010,15 @@ function removeSelectedPlacement() {
 async function submitSignature(event) {
   event.preventDefault();
   if (!signingDocument) return;
+  clearSignError();
   const mode = document.querySelector("#signature-mode").value;
   const padesGraphic = mode === "pades" && document.querySelector("#pades-graphic").checked;
   if (mode === "graphic" && placements.length === 0) {
-    showNotice("Aggiungi e posiziona almeno una firma sul documento.", "error");
+    showSignError("Aggiungi e posiziona almeno una firma sul documento.");
     return;
   }
   if (padesGraphic && placements.length !== 1) {
-    showNotice("La firma PAdES ammette una sola immagine: è l'aspetto della firma.", "error");
+    showSignError("La firma PAdES ammette una sola immagine: è l'aspetto della firma.");
     return;
   }
   const apiPlacements = placements.map(({ _clientId, ...placement }) => placement);
@@ -1011,7 +1036,7 @@ async function submitSignature(event) {
   const selectedCertificate = selectedCertificateConfig();
   if (digital && selectedCertificate?.backend === "local" && selectedCertificate.requires_pin) {
     if (!pinInput.value) {
-      showNotice("Inserisci il PIN della smart card.", "error");
+      showSignError("Inserisci il PIN della smart card.");
       return;
     }
     payload.pin = pinInput.value;
@@ -1030,10 +1055,10 @@ async function submitSignature(event) {
     document.querySelector("#sign-config").hidden = true;
     document.querySelector("#sign-progress").hidden = false;
     renderJobStatus(job);
-    await loadDocuments();
     scheduleJobPoll();
+    loadDocuments().catch((error) => showSignError(error.message));
   } catch (error) {
-    showNotice(error.message, "error");
+    showSignError(error.message);
     button.disabled = false;
   }
 }
