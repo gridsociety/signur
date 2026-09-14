@@ -76,6 +76,9 @@ def test_home_assets_are_public_but_do_not_contain_protected_data(client):  # ty
     assert "confirm.hidden = false" in script.text
     assert "classList.toggle(\"compact\", !hasPdfPreview)" in script.text
     assert "startPlacementGesture" in script.text
+    assert "changeSignatureMode" in script.text
+    assert "initial.width * constrainedScale" in script.text
+    assert "initial.height * constrainedScale" in script.text
     assert client.get("/static/pdf-preview.js").status_code == 200
     assert client.get("/static/vendor/pdfjs/LICENSE").status_code == 200
     assert client.get("/static/vendor/pdfjs/build/pdf.mjs").status_code == 200

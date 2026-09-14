@@ -770,6 +770,13 @@ function updateSignMode() {
   updateSignSummary();
 }
 
+function changeSignatureMode() {
+  placements = [];
+  selectedPlacementId = null;
+  renderPlacements();
+  updateSignMode();
+}
+
 function updateSignSummary() {
   const mode = document.querySelector("#signature-mode").value;
   const summary = document.querySelector("#sign-summary");
@@ -930,8 +937,23 @@ function startPlacementGesture(event, placement, element, resizing) {
     const deltaX = (moveEvent.clientX - startX) / stage.clientWidth;
     const deltaY = (moveEvent.clientY - startY) / stage.clientHeight;
     if (resizing) {
-      placement.width = Math.min(1 - placement.x, Math.max(0.03, initial.width + deltaX));
-      placement.height = Math.min(1 - placement.y, Math.max(0.03, initial.height + deltaY));
+      // Project the pointer movement onto the placement diagonal: this lets both
+      // axes drive the gesture while one scale factor preserves the image ratio.
+      const widthPixels = initial.width * stage.clientWidth;
+      const heightPixels = initial.height * stage.clientHeight;
+      const deltaWidthPixels = deltaX * stage.clientWidth;
+      const deltaHeightPixels = deltaY * stage.clientHeight;
+      const scale = 1 + (
+        deltaWidthPixels * widthPixels + deltaHeightPixels * heightPixels
+      ) / (widthPixels ** 2 + heightPixels ** 2);
+      const minimumScale = Math.max(0.03 / initial.width, 0.03 / initial.height);
+      const maximumScale = Math.min(
+        (1 - placement.x) / initial.width,
+        (1 - placement.y) / initial.height,
+      );
+      const constrainedScale = Math.min(maximumScale, Math.max(minimumScale, scale));
+      placement.width = initial.width * constrainedScale;
+      placement.height = initial.height * constrainedScale;
       element.style.width = `${placement.width * 100}%`;
       element.style.height = `${placement.height * 100}%`;
     } else {
@@ -2165,7 +2187,7 @@ document.querySelector("#new-pkcs11-library").addEventListener("input", () => {
   }, 600);
 });
 document.querySelector("#discover-pkcs11").addEventListener("click", () => discoverLocalCertificates({ checkExists: true }));
-document.querySelector("#signature-mode").addEventListener("change", updateSignMode);
+document.querySelector("#signature-mode").addEventListener("change", changeSignatureMode);
 document.querySelector("#cades-strategy").addEventListener("change", updateSignSummary);
 document.querySelector("#xades-packaging").addEventListener("change", updateSignSummary);
 document.querySelector("#signing-proxy").addEventListener("change", updateSignMode);
